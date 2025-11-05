@@ -92,8 +92,6 @@ docker run -p 7687:7687 -p 7474:7474 \
 docker run -p 6379:6379 falkordb/falkordb:edge
 ```
 
-c
-
 ### 2. Add to Open WebUI
 
 Copy the raw GitHub URLs and paste them into Open WebUI's import dialog:
