@@ -1,6 +1,6 @@
 # Open WebUI Graphiti Memory Extensions
 
-[Graphiti](https://github.com/getzep/graphiti-core)-based knowledge graph memory extensions for [Open WebUI](https://github.com/open-webui/open-webui).
+[Graphiti](https://github.com/getzep/graphiti)-based knowledge graph memory extensions for [Open WebUI](https://github.com/open-webui/open-webui).
 
 ## Features
 
