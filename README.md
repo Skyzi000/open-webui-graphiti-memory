@@ -2,190 +2,196 @@
 
 [Graphiti](https://github.com/getzep/graphiti)-based knowledge graph memory extensions for [Open WebUI](https://github.com/open-webui/open-webui).
 
-## Features
+## Overview
 
-### 📝 Filter: Graphiti Memory (`functions/filter/graphiti_memory.py`)
-Automatically identifies and stores valuable information from chats as memories in a knowledge graph.
+This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). The core feature is the **Filter** that transparently provides time-aware contextual memory to LLMs during conversations.
+
+### Key Benefits
+
+- **Temporal Memory**: Graphiti tracks when information was valid, allowing accurate historical queries
+- **Transparent Integration**: Memory is automatically searched and injected into LLM context, and new information is automatically extracted and saved after each turn via the Filter
+- **Knowledge Graph Structure**: Entities, relationships, and episodes are extracted and interconnected
+- **Multi-User Isolation**: Each user has their own isolated memory space
+
+## Components
+
+### 📝 Filter: Graphiti Memory (Main Component)
+
+**Location**: `functions/filter/graphiti_memory.py`
+
+The Filter is the primary component that transparently integrates memory into your conversations:
+
+1. **Before LLM Processing**: Automatically searches for relevant memories based on the current conversation
+2. **Context Injection**: Injects retrieved memories into the LLM's context
+3. **After Response**: Automatically stores new information as episodes in the knowledge graph
 
 **Features:**
-- Automatic memory search before chat processing
-- Memory injection into conversation context
-- Automatic memory storage after chat completion
-- RAG context integration
-- Multi-user support with isolated memory spaces
+
+- Automatic memory search and injection
+- RAG document integration
 - Configurable search strategies (Fast/Balanced/Quality)
+- Per-user memory isolation
+- Optional automatic saving of user/assistant messages
 
-### 🔘 Action: Add Graphiti Memory (`functions/action/add_graphiti_memory_action.py`)
-Action button to manually save clicked messages to Graphiti knowledge graph memory.
+### 🔘 Action: Add Graphiti Memory
+
+**Location**: `functions/action/add_graphiti_memory_action.py`
+
+Provides an action button to manually save specific messages to memory.
+
+**Use Case**: Save the assistant's final response when Filter's automatic saving is disabled. By default, the Filter only saves:
+
+- The last user message
+- Part of the content extracted from files attached to the chat
+- The assistant message immediately before the user's message
+
+The final assistant response is NOT saved by default. This design prevents incorrect assistant responses from being automatically stored during the regeneration process (when users modify their message and regenerate responses multiple times). Use this Action button to explicitly save important assistant responses when you're satisfied with the answer. (Not needed if you enable `save_assistant_response` in Filter's User Valves.)
+
+### 🛠️ Tools: Graphiti Memory Manage
+
+**Location**: `tools/graphiti_memory_manage.py`
+
+AI-callable tools for memory management.
 
 **Features:**
-- Manual memory save via button click
-- User/Assistant message selection
-- Episode metadata tracking
-- Group-based memory isolation
 
-### 🛠️ Tools: Graphiti Memory Manage (`tools/graphiti_memory_manage.py`)
-Comprehensive memory management tools for AI-driven operations.
+- **Precise Search**: Search for specific Entities, Facts (relationships), or Episodes separately
+- **Confirmation Dialogs**: Well-designed confirmation dialogs before deletion operations
+- **Safe Deletion**: Search and delete specific memories with preview
+- **Batch Operations**: Manage multiple memory items at once
+- **UUID-based Operations**: Direct manipulation via UUIDs when needed
 
-**Features:**
-- Add new memories (text/message/json)
-- Search entities, facts, and episodes
-- Delete specific memories with confirmation
-- Clear all memory (with double confirmation)
-- UUID-based precise deletion
-- Batch operations
+**Memory Types:**
+
+- **Entities**: People, places, concepts with summaries
+- **Facts (Edges)**: Relationships between entities with temporal validity
+- **Episodes**: Conversation history and source documents
 
 ## Requirements
 
 - Python 3.10+
 - Open WebUI
-- Graph database (Neo4j or FalkorDB)
-- OpenAI-compatible LLM endpoint
+- Neo4j database (recommended)
+- OpenAI-compatible LLM endpoint with JSON structured output support
 
 ## Installation
 
 ### 1. Install Graph Database
 
-**Option A: FalkorDB (Recommended for Docker)**
-```bash
-docker run -p 6379:6379 falkordb/falkordb:edge
-```
+#### Neo4j (Recommended)
 
-**Option B: Neo4j**
 ```bash
 docker run -p 7687:7687 -p 7474:7474 \
   -e NEO4J_AUTH=neo4j/password \
   neo4j:latest
 ```
 
+#### FalkorDB (Alternative, not recently tested)
+
+```bash
+docker run -p 6379:6379 falkordb/falkordb:edge
+```
+
+c
+
 ### 2. Add to Open WebUI
 
-**Method 1: As Submodule (Recommended)**
+Copy the raw GitHub URLs and paste them into Open WebUI's import dialog:
 
-Add this repository as a submodule to your Open WebUI extensions:
+- Filter: `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/functions/filter/graphiti_memory.py`
+- Action: `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/functions/action/add_graphiti_memory_action.py`
+- Tools: `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/tools/graphiti_memory_manage.py`
 
-```bash
-cd /path/to/your/open-webui-extensions
-git submodule add https://github.com/Skyzi000/open-webui-graphiti-memory.git graphiti
-```
+For detailed instructions, refer to the [Open WebUI official documentation](https://docs.openwebui.com/).
 
-Then create symbolic links:
-```bash
-ln -s graphiti/functions/filter/graphiti_memory.py functions/filter/
-ln -s graphiti/functions/action/add_graphiti_memory_action.py functions/action/
-ln -s graphiti/tools/graphiti_memory_manage.py tools/
-```
-
-**Method 2: Direct Installation**
-
-Copy the files directly to your Open WebUI functions/tools directories.
-
-### 3. Install Dependencies
-
-```bash
-pip install graphiti-core[falkordb]  # For FalkorDB
-# or
-pip install graphiti-core[neo4j]  # For Neo4j
-```
+Open WebUI will automatically install dependencies (`graphiti-core`) when you activate these extensions.
 
 ## Configuration
 
 ### Valves Settings
 
-Configure the extensions via Open WebUI's admin panel:
+#### Graph Database
 
-**Graph Database:**
-- `graph_db_backend`: Choose 'neo4j' or 'falkordb'
-- Neo4j: Configure `neo4j_uri`, `neo4j_user`, `neo4j_password`
-- FalkorDB: Configure `falkordb_host`, `falkordb_port`
+- `graph_db_backend`: `'neo4j'` (recommended) or `'falkordb'`
+- For Neo4j: Configure `neo4j_uri`, `neo4j_user`, `neo4j_password`
+- For FalkorDB: Configure `falkordb_host`, `falkordb_port`
 
-**LLM Settings:**
-- `llm_client_type`: 'openai' or 'generic' (try both to see which works better)
+#### LLM Settings
+
+**Recommended**: Use OpenAI's official API for best compatibility, especially for JSON structured output.
+
+- `llm_client_type`: `'openai'` (recommended) or `'generic'`
 - `openai_api_url`: Your OpenAI-compatible endpoint
-- `model`: Model for memory processing (e.g., 'gpt-4')
-- `embedding_model`: Embedding model (e.g., 'text-embedding-3-small')
+- `model`: Memory processing model (default recommended)
+- `embedding_model`: Embedding model (default recommended)
 - `api_key`: Your API key
 
-**Search Strategy (Filter only):**
-- `search_strategy`: 
-  - 'fast': BM25 only (~0.1s, no embedding calls)
-  - 'balanced': BM25 + Cosine Similarity (~0.5s) - DEFAULT
-  - 'quality': + Cross-Encoder reranking (~1-5s)
+**Important**: The LLM endpoint must support JSON structured output properly. Endpoints that don't handle structured output correctly will cause ingestion failures.
 
-**Memory Isolation:**
+#### Search Strategy (Filter only)
+
+- `search_strategy`:
+  - `'fast'`: BM25 full-text search only (no embedding calls)
+  - `'balanced'`: BM25 + Cosine Similarity (DEFAULT)
+  - `'quality'`: + Cross-Encoder reranking (may not work correctly in current version)
+
+Note: The 'quality' strategy may have compatibility issues in the current version.
+
+#### Memory Isolation
+
 - `group_id_format`: Format for user memory isolation (default: `{user_id}`)
-  - Use `{user_id}` for stable, per-user isolation
-  - Set to 'none' for shared memory space
+  - Use `{user_id}` for per-user isolation
+  - Available placeholders: `{user_id}`, `{user_name}`, `{user_email}`
+  - Example: `{user_email}` converts `user@example.com` to `user_example_com`
+  - Using `{user_email}` makes it easier to share memory across different applications
+  - **Warning**: Email/name may be changed, which would change the group_id. Use `{user_id}` for stable isolation.
+  - Set to `'none'` for shared memory space
 
 ### User Valves
 
 Users can customize their experience:
 
+**Note**: To change the default values for all users, administrators should edit the script files directly.
+
 **Filter:**
+
 - `enabled`: Enable/disable automatic memory
-- `save_user_message`: Auto-save user messages
-- `save_assistant_response`: Auto-save assistant responses
-- `merge_retrieved_context`: Merge RAG context into memories
+- `show_status`: Show status messages during memory operations
+- `save_user_message`: Auto-save user messages as episodes
+- `save_assistant_response`: Auto-save the latest assistant response as episodes
+- `save_previous_assistant_message`: Auto-save the assistant message before the user's message
+- `merge_retrieved_context`: Include part of the content from files attached by the user
+- `allowed_rag_source_types`: Comma-separated list of retrieval source types to merge (e.g., `'file,text'`)
+- `inject_facts`: Inject relationship facts from memory search results
+- `inject_entities`: Inject entity summaries from memory search results
 
 **Tools:**
-- `message_language`: UI language ('en' or 'ja')
 
-## Architecture
+- `message_language`: UI language (`'en'` or `'ja'`)
 
-### Multi-User Support
+## How It Works
 
-The extensions use context variables for complete request isolation:
-- Custom OpenAI client classes inject per-user headers dynamically
-- No shared state between concurrent requests
-- Headers forwarded: User-Name, User-Id, User-Email, User-Role, Chat-Id
+### Transparent Memory Integration
 
-### Search Strategies
+1. **User sends a message** → Filter searches for relevant memories
+2. **Memories are injected** into the LLM's context
+3. **LLM processes** the message with memory context
+4. **Response is generated** with awareness of past information
+5. **New information is extracted** and stored as episodes/entities/facts
 
-Three performance/quality tradeoffs:
-1. **Fast** (~100ms): BM25 full-text search only
-2. **Balanced** (~500ms): BM25 + Cosine Similarity (DEFAULT)
-3. **Quality** (~1-5s): + Cross-Encoder reranking
+### Request Headers to LLM Provider
 
-### Memory Types
-
-- **Entities (Nodes)**: People, places, concepts with summaries
-- **Facts (Edges)**: Relationships with validity periods
-- **Episodes**: Conversation history with metadata
-
-## Usage Examples
-
-### Filter: Automatic Memory
-
-Just chat normally - the filter automatically:
-1. Searches for relevant memories before processing
-2. Injects memories into conversation context
-3. Stores new information after completion
-
-### Action: Manual Save
-
-Click the action button on any message to manually save it to memory.
-
-### Tools: Memory Management
-
-```
-# Add new memory
-add_memory(name="Meeting Notes", content="Discussed Q1 targets with John", source="text")
-
-# Search entities
-search_entities(query="John", limit=10)
-
-# Delete specific memories
-search_and_delete_entities(query="John", limit=5)
-
-# Clear all memory (requires double confirmation)
-clear_all_memory()
-```
+- Context variables are used to pass user-specific headers to the LLM provider for each request
+- Designed for complete request isolation with no shared state between concurrent requests
+- User information headers (User-Name, User-Id, User-Email, User-Role, Chat-Id) follow Open WebUI's `ENABLE_FORWARD_USER_INFO_HEADERS` environment variable by default, but can be overridden in Valves settings
+- **Note**: This feature has not been extensively tested in all environments. Please report any issues you encounter.
 
 ## Related Projects
 
 - [Open WebUI](https://github.com/open-webui/open-webui) - Main web interface
-- [Graphiti](https://github.com/getzep/graphiti-core) - Knowledge graph memory system
-- [FalkorDB](https://github.com/FalkorDB/FalkorDB) - Graph database
+- [Graphiti](https://github.com/getzep/graphiti) - Temporal knowledge graph framework
+- [Neo4j](https://neo4j.com/) - Graph database (recommended)
+- [FalkorDB](https://www.falkordb.com/) - Alternative graph database
 
 ## License
 
@@ -194,9 +200,3 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Contributing
 
 Contributions welcome! Please feel free to submit issues or pull requests.
-
-## Author
-
-- **Skyzi000**
-- GitHub: [@Skyzi000](https://github.com/Skyzi000)
-- Website: [skyzi000.hatenablog.com](https://skyzi000.hatenablog.com/)
