@@ -3,7 +3,7 @@ title: Graphiti Memory
 author: Skyzi000
 description: Automatically identify and store valuable information from chats as Memories.
 author_url: https://github.com/Skyzi000
-repository_url: https://github.com/Skyzi000/open-webui-extensions
+repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
 version: 0.7
 requirements: graphiti-core[falkordb]
 

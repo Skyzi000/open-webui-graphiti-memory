@@ -3,7 +3,7 @@ title: Graphiti Memory Manage Tool
 author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
-repository_url: https://github.com/Skyzi000/open-webui-extensions
+repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
 version: 0.2
 requirements: graphiti-core[falkordb]
 
