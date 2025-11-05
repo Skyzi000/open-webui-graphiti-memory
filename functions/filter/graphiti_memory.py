@@ -1,7 +1,7 @@
 """
 title: Graphiti Memory
 author: Skyzi000
-description: Automatically identify and store valuable information from chats as Memories.
+description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
 version: 0.7
