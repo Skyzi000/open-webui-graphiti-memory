@@ -4,22 +4,47 @@
 
 ## Overview
 
-This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). The core feature is the **Filter** that transparently provides time-aware contextual memory to LLMs during conversations.
+This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). Available in two deployment modes:
+
+- **Filter**: Runs inside OpenWebUI server (simple setup)
+- **Pipeline**: Runs as standalone service (reduces server load, better scalability)
 
 ### Key Benefits
 
 - **Temporal Memory**: Graphiti tracks when information was valid, allowing accurate historical queries
-- **Transparent Integration**: Memory is automatically searched and injected into LLM context, and new information is automatically extracted and saved after each turn via the Filter
+- **Transparent Integration**: Memory is automatically searched and injected into LLM context, and new information is automatically extracted and saved after each turn
 - **Knowledge Graph Structure**: Entities, relationships, and episodes are extracted and interconnected
 - **Multi-User Isolation**: Each user has their own isolated memory space
+- **Flexible Deployment**: Choose between integrated Filter or standalone Pipeline based on your needs
 
 ## Components
 
-### 📝 Filter: Graphiti Memory (Main Component)
+### 🚀 Pipeline: Graphiti Memory (Standalone Service - **Recommended for Production**)
+
+**Location**: `pipelines/graphiti_memory_pipeline.py`
+
+The Pipeline version runs as an independent service, reducing OpenWebUI server load:
+
+**Architecture:**
+1. **Intercepts requests** from OpenWebUI
+2. **Searches memories** and injects context
+3. **Forwards to LLM** (your configured endpoint)
+4. **Streams responses** back to OpenWebUI
+5. **Stores memories** asynchronously (non-blocking)
+
+**Benefits:**
+- Offloads processing from OpenWebUI server
+- Independent scaling and fault isolation
+- Better resource management
+- Flexible deployment options
+
+**See**: [Pipeline Documentation](pipelines/README.md)
+
+### 📝 Filter: Graphiti Memory (Integrated - Simple Setup)
 
 **Location**: `functions/filter/graphiti_memory.py`
 
-The Filter is the primary component that transparently integrates memory into your conversations:
+The Filter version runs inside OpenWebUI server for simple deployments:
 
 1. **Before LLM Processing**: Automatically searches for relevant memories based on the current conversation
 2. **Context Injection**: Injects retrieved memories into the LLM's context
@@ -76,7 +101,20 @@ AI-callable tools for memory management.
 
 ## Installation
 
-### 1. Install Graph Database
+Choose one of the following installation methods:
+
+### Option A: Pipeline (Recommended for Production)
+
+**Best for:** High-traffic scenarios, scalability, fault isolation
+
+1. **Install Graph Database** (see below)
+2. **Follow the [Pipeline Installation Guide](pipelines/README.md)**
+
+### Option B: Filter (Simple Setup)
+
+**Best for:** Simple deployments, low traffic, testing
+
+#### 1. Install Graph Database
 
 #### Neo4j (Recommended)
 
@@ -92,7 +130,7 @@ docker run -p 7687:7687 -p 7474:7474 \
 docker run -p 6379:6379 falkordb/falkordb:edge
 ```
 
-### 2. Add to Open WebUI
+#### 2. Add Filter to Open WebUI
 
 Copy the raw GitHub URLs and paste them into Open WebUI's import dialog:
 
@@ -167,15 +205,48 @@ Users can customize their experience:
 
 - `message_language`: UI language (`'en'` or `'ja'`)
 
+## Choosing Between Filter and Pipeline
+
+| Feature | Filter | Pipeline |
+|---------|--------|----------|
+| **Deployment** | Runs inside OpenWebUI | Standalone service |
+| **Setup Complexity** | Simple (import URL) | Moderate (Docker/service) |
+| **Server Load** | Adds to OpenWebUI load | Separate service |
+| **Scalability** | Limited by server | Independent scaling |
+| **Fault Isolation** | Shared with OpenWebUI | Isolated service |
+| **Resource Control** | Shared resources | Dedicated resources |
+| **Best For** | Testing, small deployments | Production, high traffic |
+| **Maintenance** | Integrated updates | Separate updates |
+| **Network** | Local only | Can be remote |
+
+**Recommendation:**
+- **Start with Filter** for testing and small deployments
+- **Migrate to Pipeline** when you need better performance or scalability
+- **Both can share** the same graph database (easy migration)
+
 ## How It Works
 
 ### Transparent Memory Integration
 
-1. **User sends a message** → Filter searches for relevant memories
+1. **User sends a message** → Search for relevant memories
 2. **Memories are injected** into the LLM's context
 3. **LLM processes** the message with memory context
 4. **Response is generated** with awareness of past information
 5. **New information is extracted** and stored as episodes/entities/facts
+
+### Architecture Comparison
+
+**Filter Architecture:**
+```
+OpenWebUI → Filter (inlet) → LLM → Filter (outlet) → Response
+```
+
+**Pipeline Architecture:**
+```
+OpenWebUI → Pipeline → Search Memory → LLM → Store Memory → Response
+                ↓                                    ↓
+            Graph DB                            Graph DB
+```
 
 ### Request Headers to LLM Provider
 
