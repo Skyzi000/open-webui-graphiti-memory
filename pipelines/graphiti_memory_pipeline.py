@@ -1235,7 +1235,7 @@ class Pipeline:
         __user__: Optional[dict] = None,
         __event_emitter__: Optional[Any] = None,
         __metadata__: Optional[dict] = None,
-    ) -> AsyncGenerator[str, None] | dict:
+    ):
         """
         Main pipeline method that:
         1. Searches for relevant memories and injects them
@@ -1263,7 +1263,14 @@ class Pipeline:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 # Just forward to LLM without memory processing
-                return await self._forward_to_llm(body)
+                if body.get("stream", False):
+                    async for chunk in self._forward_to_llm_streaming(body):
+                        yield chunk
+                    return
+                else:
+                    response = await self._forward_to_llm(body)
+                    yield response
+                    return
         
         # Ensure Graphiti is initialized
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
@@ -1276,7 +1283,14 @@ class Pipeline:
                         "data": {"description": "Memory service unavailable", "done": True},
                     }
                 )
-            return await self._forward_to_llm(body)
+            if body.get("stream", False):
+                async for chunk in self._forward_to_llm_streaming(body):
+                    yield chunk
+                return
+            else:
+                response = await self._forward_to_llm(body)
+                yield response
+                return
         
         # Set user headers in context
         chat_id = __metadata__.get('chat_id') if __metadata__ else None
@@ -1413,7 +1427,8 @@ class Pipeline:
                         }
                     )
             
-            return response
+            # Yield the response (must use yield for consistency with streaming path)
+            yield response
 
     async def _forward_to_llm(self, body: dict) -> dict:
         """
