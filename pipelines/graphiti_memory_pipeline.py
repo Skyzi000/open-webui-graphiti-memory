@@ -575,7 +575,7 @@ class Pipeline:
                     cross_encoder=OpenAIRerankerClient(client=llm_client._base_client, config=llm_config),
                 )
             else:
-                print(f"Unsupported graph database backend: {self.valves.graph_db_backend}. Supported backends are 'neo4j' and 'falkordb'.")
+                print(f"Unsupported graph database backend '{self.valves.graph_db_backend}'. Supported backends are 'neo4j' and 'falkordb'.")
                 return False
             
             # Save current configuration hash after successful initialization
@@ -586,9 +586,9 @@ class Pipeline:
             
         except Exception as e:
             print(f"Graphiti initialization failed (will retry later if needed): {e}")
-            # Only print traceback in debug scenarios
-            # import traceback
-            # traceback.print_exc()
+            if self.valves.debug_print:
+                import traceback
+                traceback.print_exc()
             self.graphiti = None
             return False
     
@@ -884,12 +884,16 @@ class Pipeline:
         if user_valves is None:
             user_valves = self.UserValves()
         
+        # Create a deep copy of the body to avoid modifying the original
+        import copy
+        modified_body = copy.deepcopy(body)
+        messages = modified_body.get("messages", [])
+        
         # Check if this is a "Continue Response" action
-        messages = body.get("messages", [])
         if messages and messages[-1].get("role") == "assistant":
             if self.valves.debug_print:
                 print("Detected 'Continue Response' action (last message is assistant). Skipping memory search.")
-            return body, None
+            return modified_body, None
         
         # Find the last user message
         user_message = None
@@ -901,7 +905,7 @@ class Pipeline:
         if not user_message:
             if self.valves.debug_print:
                 print("No user message found. Skipping memory search.")
-            return body, None
+            return modified_body, None
         
         # Sanitize query for FalkorDB/RediSearch compatibility
         sanitized_query = user_message
@@ -910,7 +914,7 @@ class Pipeline:
             if not sanitized_query:
                 if self.valves.debug_print:
                     print("Search query is empty after sanitization. Skipping memory search.")
-                return body, None
+                return modified_body, None
         
         # Truncate message if too long
         original_length = len(sanitized_query)
@@ -958,7 +962,7 @@ class Pipeline:
             search_duration = time.time() - search_start_time
             error_msg = str(e)
             print(f"Error during Graphiti search (after {search_duration:.2f}s): {e}")
-            return body, {"error": error_msg, "duration": search_duration}
+            return modified_body, {"error": error_msg, "duration": search_duration}
         
         # Check if any results were found
         if len(results.edges) == 0 and len(results.nodes) == 0:
@@ -985,10 +989,10 @@ class Pipeline:
         
         # Inject memory message if we have facts OR entities
         if len(facts) > 0 or len(entities) > 0:
-            # Find the index of the last user message
+            # Find the index of the last user message in modified_body
             last_user_msg_index = None
-            for i in range(len(body['messages']) - 1, -1, -1):
-                if body['messages'][i].get("role") == "user":
+            for i in range(len(modified_body['messages']) - 1, -1, -1):
+                if modified_body['messages'][i].get("role") == "user":
                     last_user_msg_index = i
                     break
             
@@ -1033,11 +1037,11 @@ class Pipeline:
             }
             
             if last_user_msg_index is not None:
-                body['messages'].insert(last_user_msg_index, memory_message)
+                modified_body['messages'].insert(last_user_msg_index, memory_message)
             else:
-                body['messages'].append(memory_message)
+                modified_body['messages'].append(memory_message)
             
-            return body, {
+            return modified_body, {
                 "found": True,
                 "facts_count": len(facts),
                 "entities_count": len(entities),
@@ -1046,7 +1050,7 @@ class Pipeline:
                 "entities": entities,
             }
         
-        return body, {"found": False, "duration": search_duration}
+        return modified_body, {"found": False, "duration": search_duration}
 
     async def _store_memories(
         self,
