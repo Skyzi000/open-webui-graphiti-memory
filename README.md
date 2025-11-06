@@ -81,15 +81,13 @@ AI-callable tools for memory management.
 #### Neo4j (Recommended)
 
 ```bash
-docker run -p 7687:7687 -p 7474:7474 \
-  -e NEO4J_AUTH=neo4j/password \
-  neo4j:latest
+docker run -d -p 7687:7687 -p 7474:7474 -e NEO4J_AUTH=neo4j/password -v ./data:/data neo4j:latest
 ```
 
 #### FalkorDB (Alternative, not recently tested)
 
 ```bash
-docker run -p 6379:6379 falkordb/falkordb:edge
+docker run -d -p 6379:6379 -p 3000:3000 -v ./data:/var/lib/falkordb/data falkordb/falkordb
 ```
 
 ### 2. Add to Open WebUI
