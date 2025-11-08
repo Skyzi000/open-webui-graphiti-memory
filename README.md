@@ -4,22 +4,23 @@
 
 ## Overview
 
-This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). The core feature is the **Filter** that transparently provides time-aware contextual memory to LLMs during conversations.
+This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). The core implementation is a Filter that runs inside Open WebUI, and the same logic can optionally be hosted via the Pipelines framework (still operating in “filter” mode) when you prefer to run it in a separate process.
 
 ### Key Benefits
 
 - **Temporal Memory**: Graphiti tracks when information was valid, allowing accurate historical queries
-- **Transparent Integration**: Memory is automatically searched and injected into LLM context, and new information is automatically extracted and saved after each turn via the Filter
+- **Transparent Integration**: Memory is automatically searched and injected into LLM context, and new information is automatically extracted and saved after each turn
 - **Knowledge Graph Structure**: Entities, relationships, and episodes are extracted and interconnected
 - **Multi-User Isolation**: Each user has their own isolated memory space
+- **Flexible Deployment**: Choose between integrated Filter or standalone Pipeline based on your needs
 
 ## Components
 
-### 📝 Filter: Graphiti Memory (Main Component)
+### 📝 Filter: Graphiti Memory (Integrated - Simple Setup)
 
 **Location**: `functions/filter/graphiti_memory.py`
 
-The Filter is the primary component that transparently integrates memory into your conversations:
+The Filter version runs inside OpenWebUI server for simple deployments:
 
 1. **Before LLM Processing**: Automatically searches for relevant memories based on the current conversation
 2. **Context Injection**: Injects retrieved memories into the LLM's context
@@ -76,7 +77,13 @@ AI-callable tools for memory management.
 
 ## Installation
 
-### 1. Install Graph Database
+Choose one of the following installation methods:
+
+### Default: Filter Installation (Recommended)
+
+**Best for:** Most deployments, including production. If you need to run the same logic in the Pipelines service, copy `graphiti/pipelines/graphiti_memory_pipeline.py` to your pipelines folder (runs in the same filter mode).
+
+#### 1. Install Graph Database
 
 #### Neo4j (Recommended)
 
@@ -90,7 +97,7 @@ docker run -d -p 7687:7687 -p 7474:7474 -e NEO4J_AUTH=neo4j/password -v ./data:/
 docker run -d -p 6379:6379 -p 3000:3000 -v ./data:/var/lib/falkordb/data falkordb/falkordb
 ```
 
-### 2. Add to Open WebUI
+#### 2. Add Filter to Open WebUI
 
 Copy the raw GitHub URLs and paste them into Open WebUI's import dialog:
 
@@ -165,15 +172,34 @@ Users can customize their experience:
 
 - `message_language`: UI language (`'en'` or `'ja'`)
 
+## Optional: Pipeline Hosting
+
+`pipelines/graphiti_memory_pipeline.py` packages the exact same filter logic so it can run under the Pipelines service. Open WebUI treats it as a "filter"-type pipeline, and its `inlet`/`outlet` behavior is identical to the in-app filter.  
+To use this pipeline version, enter the following GitHub Raw URL in **Admin Settings → Pipelines**.
+
+```text
+https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/pipelines/graphiti_memory_pipeline.py
+```
+
+**Important pipeline limitations:** Open WebUI currently does not pass per-user `UserValves` or `__event_emitter__` callbacks into pipelines. As a result, unlike the Filter version, the Pipeline version always falls back to the default user settings defined in the script, and the live status display is also unavailable. If you need per-user customization or status display, deploy the filter variant instead of the pipeline.
+
 ## How It Works
 
 ### Transparent Memory Integration
 
-1. **User sends a message** → Filter searches for relevant memories
+1. **User sends a message** → Search for relevant memories
 2. **Memories are injected** into the LLM's context
 3. **LLM processes** the message with memory context
 4. **Response is generated** with awareness of past information
 5. **New information is extracted** and stored as episodes/entities/facts
+
+### Architecture Comparison
+
+**Filter/Pipeline Architecture:**
+
+```text
+OpenWebUI → Filter (inlet) → LLM → Filter (outlet) → Response
+```
 
 ### Request Headers to LLM Provider
 
