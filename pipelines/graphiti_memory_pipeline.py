@@ -884,19 +884,18 @@ class Pipeline:
             print(f"inlet:{__name__}")
             print(f"inlet:user:{user}")
         
-        # Check if user has disabled the feature
+        user_valves: Pipeline.UserValves = self.UserValves()
         if user:
-            user_valves: Pipeline.UserValves = user.get("valves", self.UserValves())
+            user_valves = user.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
         
-        # Check if graphiti is initialized, retry if not
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory search.")
-            if user and user.get("valves", self.UserValves()).show_status:
+            if user and user_valves.show_status:
                 await event_emitter(
                     {
                         "type": "status",
@@ -905,289 +904,218 @@ class Pipeline:
                 )
             return body
         
-        # Set user headers in context variable (before any API calls)
-        chat_id = metadata.get('chat_id') if metadata else None
-        headers = self._get_user_info_headers(user, chat_id)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
-        
         if user is None:
             if self.valves.debug_print:
                 print("User information is not available. Skipping memory search.")
             return body
         
-        # Check if this is a "Continue Response" action
-        # When user clicks "Continue Response" button, the last message is an assistant message
-        # In this case, we should skip memory search to avoid injecting memories again
-        messages = body.get("messages", [])
-        if messages and messages[-1].get("role") == "assistant":
-            if self.valves.debug_print:
-                print("Detected 'Continue Response' action (last message is assistant). Skipping memory search.")
-            return body
-        
-        # Find the last user message (ignore assistant/tool messages)
-        user_message = None
-        original_length = 0
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                # Extract text content from message (handles both string and list formats)
-                user_message = self._get_content_from_message(msg)
-                original_length = len(user_message) if user_message else 0
-                break
-        
-        if not user_message:
-            if self.valves.debug_print:
-                print("No user message found. Skipping memory search.")
-            return body
-        
-        # Sanitize query for FalkorDB/RediSearch compatibility (before truncation)
-        sanitized_query = user_message
-        if self.valves.sanitize_search_query:
-            sanitized_query = self._sanitize_search_query(user_message)
-            if not sanitized_query:
-                if self.valves.debug_print:
-                    print("Search query is empty after sanitization. Skipping memory search.")
-                return body
-            
-            if sanitized_query != user_message:
-                if self.valves.debug_print:
-                    print(f"Search query sanitized: removed problematic characters")
-        
-        # Truncate message if too long (keep first and last parts, drop middle)
-        original_length = len(sanitized_query)
-        max_length = self.valves.max_search_message_length
-        if max_length > 0 and len(sanitized_query) > max_length:
-            keep_length = max_length // 2 - 25  # Leave room for separator
-            sanitized_query = (
-                sanitized_query[:keep_length] 
-                + "\n\n[...]\n\n" 
-                + sanitized_query[-keep_length:]
-            )
-            if self.valves.debug_print:
-                print(f"User message truncated from {original_length} to {len(sanitized_query)} characters")
-            
-        user_valves: Pipeline.UserValves = user.get("valves", self.UserValves())
-        
-        # Get search configuration based on strategy
-        search_config = self._get_search_config()
-        
-        if self.valves.debug_print:
-            print(f"Using search strategy: {self.valves.search_strategy}")
-        
-        if user_valves.show_status:
-            preview = sanitized_query[:100] + "..." if len(sanitized_query) > 100 else sanitized_query
-            await event_emitter(
-                {
-                    "type": "status",
-                    "data": {"description": f"🔍 Searching Graphiti: {preview}", "done": False},
-                }
-            )
-        
-        # Generate group_id using configured method (email or user ID)
-        group_id = self._get_group_id(user)
-        
-        # Perform search with error handling for FalkorDB/RediSearch syntax issues
-        # Measure search time
-        search_start_time = time.time()
-        
+        token = None
         try:
-            # Use search_() for advanced search that returns SearchResults with nodes, edges, episodes, communities
-            # Search configuration is determined by search_strategy setting
-            # Only pass group_ids if group_id is not None
-            if group_id is not None:
-                results = await self.graphiti.search_(
-                    query=sanitized_query,
-                    group_ids=[group_id],
-                    config=search_config,
-                )
-            else:
-                results = await self.graphiti.search_(
-                    query=sanitized_query,
-                    config=search_config,
-                )
-            
-            # Calculate search duration
-            search_duration = time.time() - search_start_time
-            
-            if self.valves.debug_print:
-                print(f"Search completed in {search_duration:.2f}s")
-        except Exception as e:
-            search_duration = time.time() - search_start_time
-            error_msg = str(e)
-            if "Syntax error" in error_msg or "RediSearch" in error_msg:
-                print(f"FalkorDB/RediSearch syntax error during search (after {search_duration:.2f}s): {error_msg}")
-                if user_valves.show_status:
-                    await event_emitter(
-                        {
-                            "type": "status",
-                            "data": {"description": f"Memory search unavailable (syntax error, {search_duration:.2f}s)", "done": True},
-                        }
-                    )
-            else:
-                print(f"Unexpected error during Graphiti search (after {search_duration:.2f}s): {e}")
-                if user_valves.show_status:
-                    await event_emitter(
-                        {
-                            "type": "status",
-                            "data": {"description": f"Memory search failed ({search_duration:.2f}s)", "done": True},
-                        }
-                    )
-            return body
+            chat_id = metadata.get("chat_id")
+            headers = self._get_user_info_headers(user, chat_id)
+            token = user_headers_context.set(headers)
+            if self.valves.debug_print and headers:
+                print(f"Set user headers in context: {list(headers.keys())}")
         
-        # Check if any results were found
-        if len(results.edges) == 0 and len(results.nodes) == 0:
-            if user_valves.show_status:
-                await event_emitter(
-                    {
-                        "type": "status",
-                        "data": {"description": f"No relevant memories found ({search_duration:.2f}s)", "done": True},
-                    }
-                )
-            return body
-
-        # Print search results (if debug mode enabled)
-        if self.valves.debug_print:
-            print('\nSearch Results:')
-
-        facts = []
-        entities = {}  # Dictionary to store unique entities: {name: summary}
+            messages = body.get("messages", [])
+            if messages and messages[-1].get("role") == "assistant":
+                if self.valves.debug_print:
+                    print("Detected 'Continue Response' action (last message is assistant). Skipping memory search.")
+                return body
         
-        # Process EntityEdge results (relations/facts) only if enabled
-        if user_valves.inject_facts:
-            for idx, result in enumerate(results.edges, 1):
-                if self.valves.debug_print:
-                    print(f'Edge UUID: {result.uuid}')
-                    print(f'Fact({result.name}): {result.fact}')
-                    if hasattr(result, 'valid_at') and result.valid_at:
-                        print(f'Valid from: {result.valid_at}')
-                    if hasattr(result, 'invalid_at') and result.invalid_at:
-                        print(f'Valid until: {result.invalid_at}')
-
-                facts.append((result.fact, result.valid_at, result.invalid_at, result.name))
-                
-                # Emit status for each fact found
-                if user_valves.show_status:
-                    emoji = "🔚" if result.invalid_at else "🔛"
-                    await event_emitter(
-                        {
-                            "type": "status",
-                            "data": {"description": f"{emoji} Fact {idx}/{len(results.edges)}: {result.fact}", "done": False},
-                        }
-                    )
-                
-                if self.valves.debug_print:
-                    print('---')
-        else:
-            if self.valves.debug_print:
-                print(f'Skipping {len(results.edges)} facts (inject_facts is disabled)')
-        
-        # Process EntityNode results (entities with summaries) only if enabled
-        if user_valves.inject_entities:
-            for idx, result in enumerate(results.nodes, 1):
-                if self.valves.debug_print:
-                    print(f'Node UUID: {result.uuid}')
-                    print(f'Entity({result.name}): {result.summary}')
-                
-                # Store entity information
-                if result.name and result.summary:
-                    entities[result.name] = result.summary
-                    
-                    # Emit status for each entity found
-                    if user_valves.show_status:
-                        await event_emitter(
-                            {
-                                "type": "status",
-                                "data": {"description": f"👤 Entity {idx}/{len(results.nodes)}: {result.name} - {result.summary}", "done": False},
-                            }
-                        )
-                
-                if self.valves.debug_print:
-                    print('---')
-        else:
-            if self.valves.debug_print:
-                print(f'Skipping {len(results.nodes)} entities (inject_entities is disabled)')
-
-            
-        # Insert memory message if we have facts OR entities
-        if len(facts) > 0 or len(entities) > 0:
-            # Find the index of the last user message
-            last_user_msg_index = None
-            for i in range(len(body['messages']) - 1, -1, -1):
-                if body['messages'][i].get("role") == "user":
-                    last_user_msg_index = i
+            user_message = None
+            original_length = 0
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    user_message = self._get_content_from_message(msg)
+                    original_length = len(user_message) if user_message else 0
                     break
-            
-            # Determine the role to use for memory message (default to system if invalid value)
-            memory_role = self.valves.memory_message_role.lower()
-            if memory_role not in ["system", "user"]:
+        
+            if not user_message:
                 if self.valves.debug_print:
-                    print(f"Invalid memory_message_role '{memory_role}', using 'system'")
-                memory_role = "system"
-            
-            # Format memory content with improved structure
-            memory_content = "FACTS and ENTITIES represent relevant context to the current conversation.  \n"
-            
-            # Add facts section if any facts were found
-            if len(facts) > 0:
-                memory_content += "# These are the most relevant facts and their valid date ranges  \n"
-                memory_content += "# format: FACT (Date range: from - to)  \n"
-                memory_content += "<FACTS>  \n"
-                
-                for fact, valid_at, invalid_at, name in facts:
-                    # Format date range
-                    valid_str = str(valid_at) if valid_at else "unknown"
-                    invalid_str = str(invalid_at) if invalid_at else "present"
-                    
-                    memory_content += f"  - {fact} ({valid_str} - {invalid_str})  \n"
-                
-                memory_content += "</FACTS>"
-            
-            # Add entities section if any entities were found
-            if len(entities) > 0:
-                if len(facts) > 0:
-                    memory_content += "  \n\n"  # Add spacing between sections
-                memory_content += "# These are the most relevant entities  \n"
-                memory_content += "# ENTITY_NAME: entity summary  \n"
-                memory_content += "<ENTITIES>  \n"
-                
-                for entity_name, entity_summary in entities.items():
-                    memory_content += f"  - {entity_name}: {entity_summary}  \n"
-                
-                memory_content += "</ENTITIES>"
-            
-            # Insert memory before the last user message
-            memory_message = {
-                "role": memory_role,
-                "content": memory_content
-            }
-            
-            if last_user_msg_index is not None:
-                body['messages'].insert(last_user_msg_index, memory_message)
-            else:
-                # Fallback: if no user message found, append to end
-                body['messages'].append(memory_message)
-            
+                    print("No user message found. Skipping memory search.")
+                return body
+        
+            sanitized_query = user_message
+            if self.valves.sanitize_search_query:
+                sanitized_query = self._sanitize_search_query(user_message)
+                if not sanitized_query:
+                    if self.valves.debug_print:
+                        print("Search query is empty after sanitization. Skipping memory search.")
+                    return body
+                if sanitized_query != user_message and self.valves.debug_print:
+                    print("Search query sanitized: removed problematic characters")
+        
+            original_length = len(sanitized_query)
+            max_length = self.valves.max_search_message_length
+            if max_length > 0 and len(sanitized_query) > max_length:
+                keep_length = max_length // 2 - 25
+                sanitized_query = (
+                    sanitized_query[:keep_length]
+                    + "\\n\\n[...]\\n\\n"
+                    + sanitized_query[-keep_length:]
+                )
+                if self.valves.debug_print:
+                    print(f"User message truncated from {original_length} to {len(sanitized_query)} characters")
+        
+            search_config = self._get_search_config()
+            if self.valves.debug_print:
+                print(f"Using search strategy: {self.valves.search_strategy}")
+        
             if user_valves.show_status:
-                # Build status message showing what was found
-                status_parts = []
-                if len(facts) > 0:
-                    status_parts.append(f"{len(facts)} fact{'s' if len(facts) != 1 else ''}")
-                if len(entities) > 0:
-                    status_parts.append(f"{len(entities)} entit{'ies' if len(entities) != 1 else 'y'}")
-                
-                status_msg = "🧠 " + " and ".join(status_parts) + f" found ({search_duration:.2f}s)"
-                
+                preview = sanitized_query[:100] + "..." if len(sanitized_query) > 100 else sanitized_query
                 await event_emitter(
                     {
                         "type": "status",
-                        "data": {"description": status_msg, "done": True},
+                        "data": {"description": f"🔍 Searching Graphiti memory...\\n\\nPreview:\\n{preview}", "done": False},
                     }
                 )
-        return body
-
-
+        
+            start_time = time.time()
+            results = await self.graphiti.search_memory(
+                sanitized_query,
+                search_config=search_config,
+                limit_entities=10,
+                limit_facts=10,
+                limit_episodes=0,
+                truncate_query=False,
+                require_results=False,
+            )
+            search_duration = time.time() - start_time
+        
+            if self.valves.debug_print:
+                print(f"Graphiti search completed in {search_duration:.2f}s")
+        
+            if not results or (len(results.nodes) == 0 and len(results.edges) == 0):
+                if self.valves.debug_print:
+                    print("No relevant memories found.")
+                if user_valves.show_status:
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {"description": f"No relevant memories found ({search_duration:.2f}s)", "done": True},
+                        }
+                    )
+                return body
+        
+            facts = []
+            entities = {}
+        
+            if user_valves.inject_facts:
+                for idx, result in enumerate(results.edges, 1):
+                    if result.description:
+                        facts.append((result.description, result.valid_at, result.invalid_at, result.name))
+                        if self.valves.debug_print:
+                            print(f"Edge UUID: {result.uuid}")
+                            print(f"Fact({result.name}): {result.description}")
+                            print(f"Valid From: {result.valid_at}, Until: {result.invalid_at}")
+                        if user_valves.show_status:
+                            await event_emitter(
+                                {
+                                    "type": "status",
+                                    "data": {"description": f"📘 Fact {idx}/{len(results.edges)}: {result.description}", "done": False},
+                                }
+                            )
+                    if self.valves.debug_print:
+                        print('---')
+            else:
+                if self.valves.debug_print:
+                    print(f"Skipping {len(results.edges)} facts (inject_facts is disabled)")
+        
+            if user_valves.inject_entities:
+                for idx, result in enumerate(results.nodes, 1):
+                    if self.valves.debug_print:
+                        print(f"Node UUID: {result.uuid}")
+                        print(f"Entity({result.name}): {result.summary}")
+                    if result.name and result.summary:
+                        entities[result.name] = result.summary
+                        if user_valves.show_status:
+                            await event_emitter(
+                                {
+                                    "type": "status",
+                                    "data": {"description": f"👤 Entity {idx}/{len(results.nodes)}: {result.name} - {result.summary}", "done": False},
+                                }
+                            )
+                    if self.valves.debug_print:
+                        print('---')
+            else:
+                if self.valves.debug_print:
+                    print(f"Skipping {len(results.nodes)} entities (inject_entities is disabled)")
+        
+            if len(facts) > 0 or len(entities) > 0:
+                last_user_msg_index = None
+                for i in range(len(body['messages']) - 1, -1, -1):
+                    if body['messages'][i].get("role") == "user":
+                        last_user_msg_index = i
+                        break
+        
+                memory_role = self.valves.memory_message_role.lower()
+                if memory_role not in ["system", "user"]:
+                    if self.valves.debug_print:
+                        print(f"Invalid memory_message_role '{memory_role}', using 'system'")
+                    memory_role = "system"
+        
+                memory_content = "FACTS and ENTITIES represent relevant context to the current conversation.  \n"
+                
+                # Add facts section if any facts were found
+                if len(facts) > 0:
+                    memory_content += "# These are the most relevant facts and their valid date ranges  \n"
+                    memory_content += "# format: FACT (Date range: from - to)  \n"
+                    memory_content += "<FACTS>  \n"
+                    
+                    for fact, valid_at, invalid_at, name in facts:
+                        valid_str = str(valid_at) if valid_at else "unknown"
+                        invalid_str = str(invalid_at) if invalid_at else "present"
+                        
+                        memory_content += f"  - {fact} ({valid_str} - {invalid_str})  \n"
+                    
+                    memory_content += "</FACTS>"
+                
+                # Add entities section if any entities were found
+                if len(entities) > 0:
+                    if len(facts) > 0:
+                        memory_content += "  \n\n"  # Add spacing between sections
+                    memory_content += "# These are the most relevant entities  \n"
+                    memory_content += "# ENTITY_NAME: entity summary  \n"
+                    memory_content += "<ENTITIES>  \n"
+                    
+                    for entity_name, entity_summary in entities.items():
+                        memory_content += f"  - {entity_name}: {entity_summary}  \n"
+                    
+                    memory_content += "</ENTITIES>"
+                
+                # Insert memory before the last user message
+                memory_message = {
+                    "role": memory_role,
+                    "content": memory_content
+                }
+                
+                if last_user_msg_index is not None:
+                    body['messages'].insert(last_user_msg_index, memory_message)
+                else:
+                    # Fallback: if no user message found, append to end
+                    body['messages'].append(memory_message)
+                
+                if user_valves.show_status:
+                    # Build status message showing what was found
+                    status_parts = []
+                    if len(facts) > 0:
+                        status_parts.append(f"{len(facts)} fact{'s' if len(facts) != 1 else ''}")
+                    if len(entities) > 0:
+                        status_parts.append(f"{len(entities)} entit{'ies' if len(entities) != 1 else 'y'}")
+                    
+                    status_msg = "🧠 " + " and ".join(status_parts) + f" found ({search_duration:.2f}s)"
+                    
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {"description": status_msg, "done": True},
+                        }
+                    )
+            return body
+        finally:
+            if token is not None:
+                user_headers_context.reset(token)
 
     async def outlet(
         self,
@@ -1198,15 +1126,14 @@ class Pipeline:
     ) -> dict:
         metadata = self._build_metadata(body, metadata, user)
         event_emitter = event_emitter or self._noop_event_emitter
-        # Check if user has disabled the feature
+        user_valves: Pipeline.UserValves = self.UserValves()
         if user:
-            user_valves: Pipeline.UserValves = user.get("valves", self.UserValves())
+            user_valves = user.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
         
-        # Check if graphiti is initialized, retry if not
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory addition.")
@@ -1216,126 +1143,136 @@ class Pipeline:
             if self.valves.debug_print:
                 print("User information is not available. Skipping memory addition.")
             return body
+        
         chat_id = metadata.get('chat_id', 'unknown')
         message_id = metadata.get('message_id', 'unknown')
         if self.valves.debug_print:
             print(f"outlet:{__name__}, chat_id:{chat_id}, message_id:{message_id}")
         
-        # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(user, chat_id)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
+        token = None
+        try:
+            headers = self._get_user_info_headers(user, chat_id)
+            token = user_headers_context.set(headers)
+            if self.valves.debug_print and headers:
                 print(f"Set user headers in context: {list(headers.keys())}")
-
-
-        user_valves: Pipeline.UserValves = user.get("valves", self.UserValves())
-        messages = body.get("messages", [])
-        if len(messages) == 0:
-            return body
-        
-        # Determine which messages to save based on settings
-        messages_to_save = []
-        
-        # Find the last user message, last assistant message, and previous assistant message
-        last_user_message = None
-        last_assistant_message = None
-        previous_assistant_message = None
-        
-        for msg in reversed(messages):
-            if msg.get("role") == "user" and last_user_message is None:
-                last_user_message = msg
-            elif msg.get("role") == "assistant":
-                if last_user_message is None:
-                    # This is after the last user message (the latest assistant response)
-                    if last_assistant_message is None:
-                        last_assistant_message = msg
+    
+            messages = body.get("messages", [])
+            if len(messages) == 0:
+                return body
+            
+            messages_to_save = []
+            last_user_message = None
+            last_assistant_message = None
+            previous_assistant_message = None
+            
+            for msg in reversed(messages):
+                if msg.get("role") == "user" and last_user_message is None:
+                    last_user_message = msg
+                elif msg.get("role") == "assistant":
+                    if last_user_message is None:
+                        if last_assistant_message is None:
+                            last_assistant_message = msg
+                    else:
+                        if previous_assistant_message is None:
+                            previous_assistant_message = msg
+                            break
+            
+            if user_valves.save_previous_assistant_message and previous_assistant_message:
+                previous_assistant_content = self._get_content_from_message(previous_assistant_message)
+                if previous_assistant_content:
+                    messages_to_save.append(("previous_assistant", previous_assistant_content))
+            
+            user_content_block = ""
+            if user_valves.save_user_message and last_user_message:
+                user_content_block = self._get_content_from_message(last_user_message) or ""
+                if user_valves.merge_retrieved_context:
+                    allowed_types_set = self._parse_allowed_source_types(
+                        getattr(user_valves, "allowed_rag_source_types", None)
+                    )
+    
+                    rag_context_block = self._extract_rag_sources_text(
+                        last_assistant_message,
+                        allowed_types_set,
+                    )
+                    if rag_context_block:
+                        if user_content_block.strip():
+                            user_content_block = (
+                                f"{user_content_block.strip()}\n\nRetrieved Context:\n{rag_context_block}"
+                            )
+                        else:
+                            user_content_block = f"Retrieved Context:\n{rag_context_block}"
+            
+            if user_valves.save_user_message and last_user_message and user_content_block:
+                messages_to_save.append(("user", user_content_block))
+            
+            if user_valves.save_assistant_response and last_assistant_message:
+                assistant_content = self._get_content_from_message(last_assistant_message)
+                if assistant_content:
+                    messages_to_save.append(("assistant", assistant_content))
+            
+            if len(messages_to_save) == 0:
+                return body
+            
+            role_order = {"previous_assistant": 0, "user": 1, "assistant": 2}
+            messages_to_save.sort(key=lambda x: role_order.get(x[0], 99))
+            
+            episode_parts = []
+            for role, content in messages_to_save:
+                if role == "user":
+                    if self.valves.use_user_name_in_episode and user.get('name'):
+                        role_label = user['name']
+                    else:
+                        role_label = "User"
+                elif role in ("assistant", "previous_assistant"):
+                    role_label = "Assistant"
                 else:
-                    # This is before the last user message (the assistant message user is responding to)
-                    if previous_assistant_message is None:
-                        previous_assistant_message = msg
-                        break  # We found everything we need
-        
-        # Build messages_to_save list based on UserValves settings
-        if user_valves.save_previous_assistant_message and previous_assistant_message:
-            previous_assistant_content = self._get_content_from_message(previous_assistant_message)
-            if previous_assistant_content:
-                messages_to_save.append(("previous_assistant", previous_assistant_content))
-        
-        user_content_block = ""
-        if user_valves.save_user_message and last_user_message:
-            user_content_block = self._get_content_from_message(last_user_message) or ""
-            if user_valves.merge_retrieved_context:
-                allowed_types_set = self._parse_allowed_source_types(
-                    getattr(user_valves, "allowed_rag_source_types", None)
+                    role_label = role.capitalize()
+                episode_parts.append(f"{role_label}: {content}")
+            
+            episode_body = "\n".join(episode_parts)
+            
+            if user_valves.show_status:
+                await event_emitter(
+                    {
+                        "type": "status",
+                        "data": {"description": "✍️ Adding conversation to Graphiti memory...", "done": False},
+                    }
                 )
-
-                rag_context_block = self._extract_rag_sources_text(
-                    last_assistant_message,
-                    allowed_types_set,
-                )
-                if rag_context_block:
-                    if user_content_block.strip():
-                        user_content_block = (
-                            f"{user_content_block.strip()}\n\nRetrieved Context:\n{rag_context_block}"
+            
+            group_id = self._get_group_id(user)
+            saved_count = 0
+            add_results = None
+            
+            try:
+                if self.valves.add_episode_timeout > 0:
+                    if group_id is not None:
+                        add_results = await asyncio.wait_for(
+                            self.graphiti.add_episode(
+                                name=f"Chat_Interaction_{chat_id}_{message_id}",
+                                episode_body=episode_body,
+                                source=EpisodeType.message,
+                                source_description="Chat conversation",
+                                reference_time=datetime.now(),
+                                group_id=group_id,
+                                update_communities=self.valves.update_communities,
+                            ),
+                            timeout=self.valves.add_episode_timeout
                         )
                     else:
-                        user_content_block = f"Retrieved Context:\n{rag_context_block}"
-        
-        if user_valves.save_user_message and last_user_message:
-            if user_content_block:
-                messages_to_save.append(("user", user_content_block))
-        
-        if user_valves.save_assistant_response and last_assistant_message:
-            assistant_content = self._get_content_from_message(last_assistant_message)
-            if assistant_content:
-                messages_to_save.append(("assistant", assistant_content))
-        
-        if len(messages_to_save) == 0:
-            return body
-        
-        # Construct episode body in "Assistant: {message}\nUser: {message}\nAssistant: {message}" format for EpisodeType.message
-        # Sort messages to maintain chronological order: previous_assistant -> user -> assistant
-        role_order = {"previous_assistant": 0, "user": 1, "assistant": 2}
-        messages_to_save.sort(key=lambda x: role_order.get(x[0], 99))
-        
-        episode_parts = []
-        for role, content in messages_to_save:
-            if role == "user":
-                # Use actual user name if enabled, otherwise use "User"
-                if self.valves.use_user_name_in_episode and user.get('name'):
-                    role_label = user['name']
+                        add_results = await asyncio.wait_for(
+                            self.graphiti.add_episode(
+                                name=f"Chat_Interaction_{chat_id}_{message_id}",
+                                episode_body=episode_body,
+                                source=EpisodeType.message,
+                                source_description="Chat conversation",
+                                reference_time=datetime.now(),
+                                update_communities=self.valves.update_communities,
+                            ),
+                            timeout=self.valves.add_episode_timeout
+                        )
                 else:
-                    role_label = "User"
-            elif role in ("assistant", "previous_assistant"):
-                role_label = "Assistant"
-            else:
-                role_label = role.capitalize()
-            episode_parts.append(f"{role_label}: {content}")
-        
-        episode_body = "\n".join(episode_parts)
-        
-        if user_valves.show_status:
-            await event_emitter(
-                {
-                    "type": "status",
-                    "data": {"description": f"✍️ Adding conversation to Graphiti memory...", "done": False},
-                }
-            )
-        
-        # Generate group_id using configured method (email or user ID)
-        group_id = self._get_group_id(user)
-        saved_count = 0
-        
-        # Store add_episode results for detailed status display
-        add_results = None
-        
-        try:
-            # Apply timeout if configured
-            if self.valves.add_episode_timeout > 0:
-                if group_id is not None:
-                    add_results = await asyncio.wait_for(
-                        self.graphiti.add_episode(
+                    if group_id is not None:
+                        add_results = await self.graphiti.add_episode(
                             name=f"Chat_Interaction_{chat_id}_{message_id}",
                             episode_body=episode_body,
                             source=EpisodeType.message,
@@ -1343,137 +1280,66 @@ class Pipeline:
                             reference_time=datetime.now(),
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
-                        ),
-                        timeout=self.valves.add_episode_timeout
-                    )
-                else:
-                    add_results = await asyncio.wait_for(
-                        self.graphiti.add_episode(
+                        )
+                    else:
+                        add_results = await self.graphiti.add_episode(
                             name=f"Chat_Interaction_{chat_id}_{message_id}",
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description="Chat conversation",
                             reference_time=datetime.now(),
                             update_communities=self.valves.update_communities,
-                        ),
-                        timeout=self.valves.add_episode_timeout
+                        )
+                saved_count = 1
+            except asyncio.TimeoutError:
+                if self.valves.debug_print:
+                    print(f"add_episode timed out after {self.valves.add_episode_timeout}s")
+                if user_valves.show_status:
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {"description": "⚠️ Graphiti add_episode timed out", "done": True},
+                        }
                     )
-            else:
-                if group_id is not None:
-                    add_results = await self.graphiti.add_episode(
-                        name=f"Chat_Interaction_{chat_id}_{message_id}",
-                        episode_body=episode_body,
-                        source=EpisodeType.message,
-                        source_description="Chat conversation",
-                        reference_time=datetime.now(),
-                        group_id=group_id,
-                        update_communities=self.valves.update_communities,
+            except Exception as e:
+                if self.valves.debug_print:
+                    print(f"Error saving to Graphiti: {e}")
+                    traceback.print_exc()
+                if user_valves.show_status:
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {"description": f"⚠️ Error saving to Graphiti: {str(e)}", "done": True},
+                        }
                     )
+            
+            if user_valves.show_status:
+                if saved_count == 0:
+                    status_msg = "❌ Failed to save conversation to Graphiti memory"
                 else:
-                    add_results = await self.graphiti.add_episode(
-                        name=f"Chat_Interaction_{chat_id}_{message_id}",
-                        episode_body=episode_body,
-                        source=EpisodeType.message,
-                        source_description="Chat conversation",
-                        reference_time=datetime.now(),
-                        update_communities=self.valves.update_communities,
-                    )
-            if self.valves.debug_print:
-                print(f"Added conversation to Graphiti memory: {episode_body[:100]}...")
-                if add_results:
-                    print(f"Extracted {len(add_results.nodes)} entities and {len(add_results.edges)} relationships")
-            saved_count = 1
-
-            # Display extracted entities and facts in status
-            if user_valves.show_status and add_results:
-                # Show all Facts
-                if add_results.edges:
-                    for idx, edge in enumerate(add_results.edges, 1):
-                        emoji = "🔚" if edge.invalid_at else "🔛"
-                        await event_emitter(
-                            {
-                                "type": "status",
-                                "data": {"description": f"{emoji} Fact {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
-                            }
-                        )
-                
-                # Show all entities
-                if add_results.nodes:
-                    for idx, node in enumerate(add_results.nodes, 1):
-                        # Display entity name and summary (if available)
-                        entity_display = f"{node.name}"
-                        if hasattr(node, 'summary') and node.summary:
-                            entity_display += f" - {node.summary}"
-                        await event_emitter(
-                            {
-                                "type": "status",
-                                "data": {"description": f"👤 Entity {idx}/{len(add_results.nodes)}: {entity_display}", "done": False},
-                            }
-                        )
-        except asyncio.TimeoutError:
-            print(f"Timeout adding conversation to Graphiti memory after {self.valves.add_episode_timeout}s")
-            if user_valves.show_status:
-                await event_emitter(
-                    {
-                        "type": "status",
-                        "data": {"description": f"Warning: Memory save timed out", "done": False},
-                    }
-                )
-        except Exception as e:
-            error_type = type(e).__name__
-            error_msg = str(e)
-            
-            # Provide more specific error messages for common issues
-            if "ValidationError" in error_type:
-                print(f"Graphiti LLM response validation error for conversation: {error_msg}")
-                user_msg = "Graphiti: LLM response format error (will retry on next message)"
-            elif "ConnectionError" in error_type or "timeout" in error_msg.lower():
-                print(f"Graphiti connection error adding conversation: {error_msg}")
-                user_msg = "Graphiti: Connection error (temporary)"
-            else:
-                print(f"Graphiti error adding conversation: {e}")
-                user_msg = f"Graphiti: Memory save failed ({error_type})"
-            
-            # Only print full traceback for unexpected errors
-            if "ValidationError" not in error_type:
-                traceback.print_exc()
-            
-            if user_valves.show_status:
-                await event_emitter(
-                    {
-                        "type": "status",
-                        "data": {"description": f"Warning: {user_msg}", "done": False},
-                    }
-                )
-        
-        # Only increment count for successfully saved messages
-        if saved_count > 0:
-            pass  # Successfully saved messages
-
-        if user_valves.show_status:
-            if saved_count == 0:
-                status_msg = "❌ Failed to save conversation to Graphiti memory"
-            else:
-                # Build detailed status message with entity and relationship counts
-                status_parts = ["✅ Added conversation to Graphiti memory"]
-                if add_results:
-                    detail_parts = []
-                    if add_results.nodes:
-                        detail_parts.append(f"{len(add_results.nodes)} entit{'ies' if len(add_results.nodes) != 1 else 'y'}")
-                    if add_results.edges:
-                        detail_parts.append(f"{len(add_results.edges)} relation{'s' if len(add_results.edges) != 1 else ''}")
-                    if detail_parts:
-                        status_msg = " - ".join(status_parts + [" and ".join(detail_parts) + " extracted"])
+                    status_parts = ["✅ Added conversation to Graphiti memory"]
+                    if add_results:
+                        detail_parts = []
+                        if add_results.nodes:
+                            detail_parts.append(f"{len(add_results.nodes)} entit{'ies' if len(add_results.nodes) != 1 else 'y'}")
+                        if add_results.edges:
+                            detail_parts.append(f"{len(add_results.edges)} relation{'s' if len(add_results.edges) != 1 else ''}")
+                        if detail_parts:
+                            status_msg = " - ".join(status_parts + [" and ".join(detail_parts) + " extracted"])
+                        else:
+                            status_msg = status_parts[0]
                     else:
                         status_msg = status_parts[0]
-                else:
-                    status_msg = status_parts[0]
+                
+                await event_emitter(
+                    {
+                        "type": "status",
+                        "data": {"description": status_msg, "done": True},
+                    }
+                )
             
-            await event_emitter(
-                {
-                    "type": "status",
-                    "data": {"description": status_msg, "done": True},
-                }
-            )
-        
-        return body
+            return body
+        finally:
+            if token is not None:
+                user_headers_context.reset(token)
+
