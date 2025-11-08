@@ -743,6 +743,95 @@ class Pipeline:
         # Handle string format
         return content if isinstance(content, str) else ""
     
+    def _coerce_content_to_text(self, content: Any) -> str:
+        """
+        Normalize various content schemas (string, list, dict) into a plain text string.
+        Used when reconstructing streamed assistant responses.
+        """
+        if not content:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            if content.get("type") == "text":
+                return content.get("text", "")
+            return content.get("content", "")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif "content" in item:
+                        text_parts.append(item.get("content", ""))
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            return "".join(text_parts)
+        return ""
+    
+    def _append_assistant_message_to_body(self, body: dict, content: Optional[str]) -> None:
+        """
+        Append a simplified assistant message to the provided body so that
+        downstream memory extraction sees the latest response.
+        """
+        if not content:
+            return
+        messages = body.setdefault("messages", [])
+        messages.append(
+            {
+                "role": "assistant",
+                "content": content,
+            }
+        )
+    
+    def _extract_text_from_stream_chunk(self, chunk: str) -> str:
+        """
+        Parse a streaming SSE chunk and extract any assistant text delta it contains.
+        """
+        if not chunk:
+            return ""
+        chunk = chunk.strip()
+        if not chunk.startswith("data:"):
+            return ""
+        data_str = chunk[len("data:") :].strip()
+        if not data_str or data_str == "[DONE]":
+            return ""
+        try:
+            payload = json.loads(data_str)
+        except json.JSONDecodeError:
+            return ""
+        
+        text_parts: list[str] = []
+        for choice in payload.get("choices", []):
+            delta = choice.get("delta") or {}
+            piece = self._coerce_content_to_text(delta.get("content"))
+            if piece:
+                text_parts.append(piece)
+        return "".join(text_parts)
+    
+    def _extract_assistant_text_from_response(self, response: dict) -> Optional[str]:
+        """
+        Pull the assistant message text from a non-streaming completion response.
+        """
+        if not isinstance(response, dict):
+            return None
+        choices = response.get("choices") or []
+        if not choices:
+            return None
+        first_choice = choices[0] or {}
+        message = first_choice.get("message")
+        if isinstance(message, dict):
+            content = self._get_content_from_message(message)
+            if content:
+                return content
+            reasoning_text = self._coerce_content_to_text(message.get("reasoning_content"))
+            if reasoning_text:
+                return reasoning_text
+        text_value = first_choice.get("text")
+        if isinstance(text_value, str) and text_value:
+            return text_value
+        return None
+    
     def _extract_rag_sources_text(
         self,
         message: Optional[dict],
@@ -1353,10 +1442,28 @@ class Pipeline:
         # We need to handle both streaming and non-streaming responses
         is_streaming = body.get("stream", False)
         
+        capture_assistant_response = bool(
+            getattr(user_valves, "save_assistant_response", False)
+        )
+        
         if is_streaming:
-            # For streaming: yield chunks as they come, then store memories after
+            # For streaming: yield chunks as they come, track assistant text, then store memories after
+            stream_text_parts: Optional[list[str]] = (
+                [] if capture_assistant_response else None
+            )
             async for chunk in self._forward_to_llm_streaming(modified_body):
+                if capture_assistant_response:
+                    extracted_text = self._extract_text_from_stream_chunk(chunk)
+                    if extracted_text:
+                        stream_text_parts.append(extracted_text)
                 yield chunk
+            
+            if capture_assistant_response:
+                assistant_stream_content = "".join(stream_text_parts or [])
+                if assistant_stream_content:
+                    self._append_assistant_message_to_body(
+                        modified_body, assistant_stream_content
+                    )
             
             # After streaming is complete, store memories asynchronously
             if __event_emitter__ and user_valves.show_status:
@@ -1401,6 +1508,10 @@ class Pipeline:
         else:
             # For non-streaming: get full response, store memories, then return
             response = await self._forward_to_llm(modified_body)
+            if capture_assistant_response:
+                assistant_text = self._extract_assistant_text_from_response(response)
+                if assistant_text:
+                    self._append_assistant_message_to_body(modified_body, assistant_text)
             
             # Store memories
             if __event_emitter__ and user_valves.show_status:
