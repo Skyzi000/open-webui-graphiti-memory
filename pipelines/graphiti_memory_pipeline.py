@@ -204,6 +204,10 @@ class Pipeline:
     6. Extract and store new memories in graph database
     """
     class Valves(BaseModel):
+        pipelines: list[str] = Field(
+            default=["*"],
+            description="List of model IDs this pipeline applies to. Use ['*'] to attach to all models.",
+        )
         llm_client_type: str = Field(
             default="openai",
             description="Type of LLM client to use: 'openai' for OpenAI client, 'generic' for OpenAI-compatible generic client. Try both to see which works better with your LLM provider.",
