@@ -186,7 +186,7 @@ class Pipeline:
     - Graphiti documentation: https://github.com/getzep/graphiti-core
     
     Related Classes:
-    - Valves: Configuration settings for the filter
+    - Valves: Configuration settings for the pipeline
     - UserValves: Per-user configuration settings
     
     Key Methods:
@@ -372,6 +372,8 @@ class Pipeline:
 
 
     def __init__(self):
+        # Set type to "filter" so Open WebUI treats this pipeline as a filter.
+        # This allows it to use inlet/outlet methods for pre/post-processing.
         self.type = "filter"
         self.name = "Graphiti Memory"
         self.valves = self.Valves()
@@ -956,7 +958,7 @@ class Pipeline:
                 keep_length = max_length // 2 - 25
                 sanitized_query = (
                     sanitized_query[:keep_length]
-                    + "\\n\\n[...]\\n\\n"
+                    + "\n\n[...]\n\n"
                     + sanitized_query[-keep_length:]
                 )
                 if self.valves.debug_print:

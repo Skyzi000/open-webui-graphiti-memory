@@ -177,7 +177,7 @@ Users can customize their experience:
 ## Optional: Pipeline Hosting
 
 `pipelines/graphiti_memory_pipeline.py` packages the exact same filter logic so it can run under the Pipelines service. Open WebUI treats it as a "filter"-type pipeline, and its `inlet`/`outlet` behavior is identical to the in-app filter.  
-To use this pipeline version, enter the following GitHub Raw URL in the pipeline settings under administrator settings.
+To use this pipeline version, enter the following GitHub Raw URL in **Admin Settings → Pipelines**.
 
 ```text
 https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/pipelines/graphiti_memory_pipeline.py
