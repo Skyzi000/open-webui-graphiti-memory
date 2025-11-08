@@ -176,7 +176,14 @@ Users can customize their experience:
 
 ## Optional: Pipeline Hosting
 
-`pipelines/graphiti_memory_pipeline.py` packages the exact same filter logic so it can run under the Pipelines service. Open WebUI treats it as a "filter"-type pipeline, and its `inlet`/`outlet` behavior is identical to the in-app filter. Copy it to the Pipelines server only when you want to run Graphiti memory on a separate host—no extra configuration or LLM proxying is required.
+`pipelines/graphiti_memory_pipeline.py` packages the exact same filter logic so it can run under the Pipelines service. Open WebUI treats it as a "filter"-type pipeline, and its `inlet`/`outlet` behavior is identical to the in-app filter.  
+To use this pipeline version, enter the following GitHub Raw URL in the pipeline settings under administrator settings.
+
+```text
+https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/pipelines/graphiti_memory_pipeline.py
+```
+
+**Important pipeline limitations:** Open WebUI currently does not pass per-user `UserValves` or `__event_emitter__` callbacks into pipelines. As a result, unlike the Filter version, the Pipeline version always falls back to the default user settings defined in the script, and the live status display is also unavailable. If you need per-user customization or status display, deploy the filter variant instead of the pipeline.
 
 ## How It Works
 
@@ -191,7 +198,8 @@ Users can customize their experience:
 ### Architecture Comparison
 
 **Filter/Pipeline Architecture:**
-```
+
+```text
 OpenWebUI → Filter (inlet) → LLM → Filter (outlet) → Response
 ```
 
