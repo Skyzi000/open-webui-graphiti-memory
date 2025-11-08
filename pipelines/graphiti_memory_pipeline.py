@@ -967,25 +967,40 @@ class Pipeline:
                 await event_emitter(
                     {
                         "type": "status",
-                        "data": {"description": f"🔍 Searching Graphiti memory...\\n\\nPreview:\\n{preview}", "done": False},
+                        "data": {"description": f"🔍 Searching Graphiti memory...\n\nPreview:\n{preview}", "done": False},
                     }
                 )
         
+            group_id = self._get_group_id(user)
+
+            search_kwargs = {
+                "query": sanitized_query,
+                "config": search_config,
+            }
+            if group_id is not None:
+                search_kwargs["group_ids"] = [group_id]
+        
             start_time = time.time()
-            results = await self.graphiti.search_memory(
-                sanitized_query,
-                search_config=search_config,
-                limit_entities=10,
-                limit_facts=10,
-                limit_episodes=0,
-                truncate_query=False,
-                require_results=False,
-            )
+            try:
+                results = await self.graphiti.search_(**search_kwargs)
+            except Exception as exc:
+                search_duration = time.time() - start_time
+                if self.valves.debug_print:
+                    print(f"Graphiti search failed after {search_duration:.2f}s: {exc}")
+                    traceback.print_exc()
+                if user_valves.show_status:
+                    await event_emitter(
+                        {
+                            "type": "status",
+                            "data": {"description": f"Memory search unavailable ({search_duration:.2f}s)", "done": True},
+                        }
+                    )
+                return body
+        
             search_duration = time.time() - start_time
         
             if self.valves.debug_print:
                 print(f"Graphiti search completed in {search_duration:.2f}s")
-        
             if not results or (len(results.nodes) == 0 and len(results.edges) == 0):
                 if self.valves.debug_print:
                     print("No relevant memories found.")
@@ -1003,17 +1018,17 @@ class Pipeline:
         
             if user_valves.inject_facts:
                 for idx, result in enumerate(results.edges, 1):
-                    if result.description:
-                        facts.append((result.description, result.valid_at, result.invalid_at, result.name))
+                    if result.fact:
+                        facts.append((result.fact, result.valid_at, result.invalid_at, result.name))
                         if self.valves.debug_print:
                             print(f"Edge UUID: {result.uuid}")
-                            print(f"Fact({result.name}): {result.description}")
+                            print(f"Fact({result.name}): {result.fact}")
                             print(f"Valid From: {result.valid_at}, Until: {result.invalid_at}")
                         if user_valves.show_status:
                             await event_emitter(
                                 {
                                     "type": "status",
-                                    "data": {"description": f"📘 Fact {idx}/{len(results.edges)}: {result.description}", "done": False},
+                                    "data": {"description": f"📘 Fact {idx}/{len(results.edges)}: {result.fact}", "done": False},
                                 }
                             )
                     if self.valves.debug_print:
@@ -1342,4 +1357,3 @@ class Pipeline:
         finally:
             if token is not None:
                 user_headers_context.reset(token)
-
