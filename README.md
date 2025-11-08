@@ -4,10 +4,7 @@
 
 ## Overview
 
-This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). Available in two deployment modes:
-
-- **Filter**: Runs inside OpenWebUI server (simple setup)
-- **Pipeline**: Runs as standalone service (reduces server load, better scalability)
+This extension provides **temporal knowledge graph-based memory** for Open WebUI, powered by [Graphiti](https://github.com/getzep/graphiti). The core implementation is a Filter that runs inside Open WebUI, and the same logic can optionally be hosted via the Pipelines framework (still operating in “filter” mode) when you prefer to run it in a separate process.
 
 ### Key Benefits
 
@@ -18,27 +15,6 @@ This extension provides **temporal knowledge graph-based memory** for Open WebUI
 - **Flexible Deployment**: Choose between integrated Filter or standalone Pipeline based on your needs
 
 ## Components
-
-### 🚀 Pipeline: Graphiti Memory (Standalone Service - **Recommended for Production**)
-
-**Location**: `pipelines/graphiti_memory_pipeline.py`
-
-The Pipeline version runs as an independent service, reducing OpenWebUI server load:
-
-**Architecture:**
-1. **Intercepts requests** from OpenWebUI
-2. **Searches memories** and injects context
-3. **Forwards to LLM** (your configured endpoint)
-4. **Streams responses** back to OpenWebUI
-5. **Stores memories** asynchronously (non-blocking)
-
-**Benefits:**
-- Offloads processing from OpenWebUI server
-- Independent scaling and fault isolation
-- Better resource management
-- Flexible deployment options
-
-**See**: [Pipeline Documentation](pipelines/README.md)
 
 ### 📝 Filter: Graphiti Memory (Integrated - Simple Setup)
 
@@ -103,16 +79,9 @@ AI-callable tools for memory management.
 
 Choose one of the following installation methods:
 
-### Option A: Pipeline (Recommended for Production)
+### Default: Filter Installation (Recommended)
 
-**Best for:** High-traffic scenarios, scalability, fault isolation
-
-1. **Install Graph Database** (see below)
-2. **Follow the [Pipeline Installation Guide](pipelines/README.md)**
-
-### Option B: Filter (Simple Setup)
-
-**Best for:** Simple deployments, low traffic, testing
+**Best for:** Most deployments, including production. If you need to run the same logic in the Pipelines service, copy `graphiti/pipelines/graphiti_memory_pipeline.py` to your pipelines folder (runs in the same filter mode).
 
 #### 1. Install Graph Database
 
@@ -205,24 +174,9 @@ Users can customize their experience:
 
 - `message_language`: UI language (`'en'` or `'ja'`)
 
-## Choosing Between Filter and Pipeline
+## Optional: Pipeline Hosting
 
-| Feature | Filter | Pipeline |
-|---------|--------|----------|
-| **Deployment** | Runs inside OpenWebUI | Standalone service |
-| **Setup Complexity** | Simple (import URL) | Moderate (Docker/service) |
-| **Server Load** | Adds to OpenWebUI load | Separate service |
-| **Scalability** | Limited by server | Independent scaling |
-| **Fault Isolation** | Shared with OpenWebUI | Isolated service |
-| **Resource Control** | Shared resources | Dedicated resources |
-| **Best For** | Testing, small deployments | Production, high traffic |
-| **Maintenance** | Integrated updates | Separate updates |
-| **Network** | Local only | Can be remote |
-
-**Recommendation:**
-- **Start with Filter** for testing and small deployments
-- **Migrate to Pipeline** when you need better performance or scalability
-- **Both can share** the same graph database (easy migration)
+`pipelines/graphiti_memory_pipeline.py` packages the exact same filter logic so it can run under the Pipelines service. Open WebUI treats it as a "filter"-type pipeline, and its `inlet`/`outlet` behavior is identical to the in-app filter. Copy it to the Pipelines server only when you want to run Graphiti memory on a separate host—no extra configuration or LLM proxying is required.
 
 ## How It Works
 
@@ -236,16 +190,9 @@ Users can customize their experience:
 
 ### Architecture Comparison
 
-**Filter Architecture:**
+**Filter/Pipeline Architecture:**
 ```
 OpenWebUI → Filter (inlet) → LLM → Filter (outlet) → Response
-```
-
-**Pipeline Architecture:**
-```
-OpenWebUI → Pipeline → Search Memory → LLM → Store Memory → Response
-                ↓                                    ↓
-            Graph DB                            Graph DB
 ```
 
 ### Request Headers to LLM Provider
