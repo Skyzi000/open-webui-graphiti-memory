@@ -8,7 +8,7 @@ version: 0.7
 requirements: graphiti-core[falkordb]
 
 Design:
-- Main class: Pipeline
+- Main class: Pipeline (filter type)
 - Related components:
   - Graphiti: Knowledge graph memory system
   - FalkorDriver: FalkorDB backend driver for graph storage
@@ -36,12 +36,13 @@ Architecture:
 import asyncio
 import contextvars
 import hashlib
+import inspect
 import os
 import re
 import time
 import traceback
 from datetime import datetime
-from typing import Optional, Callable, Awaitable, Any
+from typing import Optional, Callable, Any
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
@@ -179,7 +180,7 @@ class MultiUserOpenAIEmbedder(OpenAIEmbedder):
 
 class Pipeline:
     """
-    Open WebUI Pipeline for Graphiti-based memory management.
+    Open WebUI Pipeline (filter type) for Graphiti-based memory management.
     
     Design References:
     - See module docstring for overall architecture
@@ -206,7 +207,11 @@ class Pipeline:
     class Valves(BaseModel):
         pipelines: list[str] = Field(
             default=["*"],
-            description="List of model IDs this pipeline applies to. Use ['*'] to attach to all models.",
+            description="List of model IDs this filter pipeline should attach to. Use ['*'] to target all models.",
+        )
+        priority: int = Field(
+            default=0,
+            description="Execution priority for this pipeline filter. Lower numbers run earlier.",
         )
         llm_client_type: str = Field(
             default="openai",
@@ -372,11 +377,10 @@ class Pipeline:
 
 
     def __init__(self):
-        # Set type to "filter" so Open WebUI treats this pipeline as a filter.
-        # This allows it to use inlet/outlet methods for pre/post-processing.
-        self.type = "filter"
-        self.name = "Graphiti Memory"
         self.valves = self.Valves()
+        self.type = "filter"
+        self.name = "Graphiti Memory Pipeline"
+        self.description = "Graphiti-based temporal memory search and storage as a filter pipeline."
         self.graphiti = None
         self._indices_built = False  # Track if indices have been built
         self._last_config = None  # Track configuration for change detection
@@ -626,6 +630,19 @@ class Pipeline:
         
         return True
     
+    async def _emit(self, event_emitter: Optional[Callable[[dict], Any]], payload: dict) -> None:
+        """Safely forward status payloads to the provided event emitter when available."""
+        if event_emitter is None:
+            return None
+
+        try:
+            maybe_awaitable = event_emitter(payload)
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+        except Exception as exc:
+            if self.valves.debug_print:
+                print(f"Event emitter error: {exc}")
+    
     def _get_group_id(self, user: dict) -> Optional[str]:
         """
         Generate group_id for the user based on format string configuration.
@@ -843,66 +860,37 @@ class Pipeline:
         
         return sanitized
 
-    async def _noop_event_emitter(self, _: Optional[dict] = None) -> None:
-        """
-        Pipelines invoked via HTTP do not receive Open WebUI's event emitter.
-        """
-        return None
-
-    def _build_metadata(
-        self,
-        body: dict,
-        metadata: Optional[dict],
-        user: Optional[dict],
-    ) -> dict:
-        """
-        Reconstruct the metadata dict filters usually receive inside Open WebUI.
-        """
-        merged: dict[str, Any] = {}
-        if isinstance(metadata, dict):
-            merged.update(metadata)
-        elif isinstance(body.get("metadata"), dict):
-            merged.update(body["metadata"])
-        
-        if "chat_id" not in merged and body.get("chat_id"):
-            merged["chat_id"] = body["chat_id"]
-        if "message_id" not in merged and body.get("id"):
-            merged["message_id"] = body["id"]
-        if "session_id" not in merged and body.get("session_id"):
-            merged["session_id"] = body["session_id"]
-        if "filter_ids" not in merged and body.get("filter_ids"):
-            merged["filter_ids"] = body["filter_ids"]
-        if user and "user_id" not in merged and user.get("id"):
-            merged["user_id"] = user["id"]
-        
-        return merged
-
     async def inlet(
         self,
         body: dict,
         user: Optional[dict] = None,
         metadata: Optional[dict] = None,
-        event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
+        event_emitter: Optional[Callable[[dict], Any]] = None,
     ) -> dict:
-        metadata = self._build_metadata(body, metadata, user)
-        event_emitter = event_emitter or self._noop_event_emitter
+        __user__ = user
+        __metadata__ = metadata
+
+        async def __event_emitter__(payload: dict) -> None:
+            await self._emit(event_emitter, payload)
+
         if self.valves.debug_print:
             print(f"inlet:{__name__}")
-            print(f"inlet:user:{user}")
+            print(f"inlet:user:{__user__}")
         
-        user_valves: Pipeline.UserValves = self.UserValves()
-        if user:
-            user_valves = user.get("valves", self.UserValves())
+        # Check if user has disabled the feature
+        if __user__:
+            user_valves: Pipeline.UserValves = __user__.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
         
+        # Check if graphiti is initialized, retry if not
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory search.")
-            if user and user_valves.show_status:
-                await event_emitter(
+            if __user__ and __user__.get("valves", self.UserValves()).show_status:
+                await __event_emitter__(
                     {
                         "type": "status",
                         "data": {"description": "Memory service unavailable", "done": True},
@@ -910,29 +898,36 @@ class Pipeline:
                 )
             return body
         
-        if user is None:
-            if self.valves.debug_print:
-                print("User information is not available. Skipping memory search.")
-            return body
-        
+        # Set user headers in context variable (before any API calls)
+        chat_id = __metadata__.get('chat_id') if __metadata__ else None
         token = None
-        try:
-            chat_id = metadata.get("chat_id")
-            headers = self._get_user_info_headers(user, chat_id)
+        headers = self._get_user_info_headers(__user__, chat_id)
+        if headers:
             token = user_headers_context.set(headers)
-            if self.valves.debug_print and headers:
+            if self.valves.debug_print:
                 print(f"Set user headers in context: {list(headers.keys())}")
-        
+
+        try:
+            if __user__ is None:
+                if self.valves.debug_print:
+                    print("User information is not available. Skipping memory search.")
+                return body
+
+            # Check if this is a "Continue Response" action
+            # When user clicks "Continue Response" button, the last message is an assistant message
+            # In this case, we should skip memory search to avoid injecting memories again
             messages = body.get("messages", [])
             if messages and messages[-1].get("role") == "assistant":
                 if self.valves.debug_print:
                     print("Detected 'Continue Response' action (last message is assistant). Skipping memory search.")
                 return body
         
+            # Find the last user message (ignore assistant/tool messages)
             user_message = None
             original_length = 0
             for msg in reversed(messages):
                 if msg.get("role") == "user":
+                    # Extract text content from message (handles both string and list formats)
                     user_message = self._get_content_from_message(msg)
                     original_length = len(user_message) if user_message else 0
                     break
@@ -942,6 +937,7 @@ class Pipeline:
                     print("No user message found. Skipping memory search.")
                 return body
         
+            # Sanitize query for FalkorDB/RediSearch compatibility (before truncation)
             sanitized_query = user_message
             if self.valves.sanitize_search_query:
                 sanitized_query = self._sanitize_search_query(user_message)
@@ -949,69 +945,96 @@ class Pipeline:
                     if self.valves.debug_print:
                         print("Search query is empty after sanitization. Skipping memory search.")
                     return body
-                if sanitized_query != user_message and self.valves.debug_print:
-                    print("Search query sanitized: removed problematic characters")
-        
+
+                if sanitized_query != user_message:
+                    if self.valves.debug_print:
+                        print(f"Search query sanitized: removed problematic characters")
+
+            # Truncate message if too long (keep first and last parts, drop middle)
             original_length = len(sanitized_query)
             max_length = self.valves.max_search_message_length
             if max_length > 0 and len(sanitized_query) > max_length:
-                keep_length = max_length // 2 - 25
+                keep_length = max_length // 2 - 25  # Leave room for separator
                 sanitized_query = (
-                    sanitized_query[:keep_length]
-                    + "\n\n[...]\n\n"
+                    sanitized_query[:keep_length] 
+                    + "\n\n[...]\n\n" 
                     + sanitized_query[-keep_length:]
                 )
                 if self.valves.debug_print:
                     print(f"User message truncated from {original_length} to {len(sanitized_query)} characters")
         
+            user_valves: Pipeline.UserValves = __user__.get("valves", self.UserValves())
+
+            # Get search configuration based on strategy
             search_config = self._get_search_config()
+
             if self.valves.debug_print:
                 print(f"Using search strategy: {self.valves.search_strategy}")
         
             if user_valves.show_status:
                 preview = sanitized_query[:100] + "..." if len(sanitized_query) > 100 else sanitized_query
-                await event_emitter(
+                await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"🔍 Searching Graphiti memory...\n\nPreview:\n{preview}", "done": False},
+                        "data": {"description": f"🔍 Searching Graphiti: {preview}", "done": False},
                     }
                 )
-        
-            group_id = self._get_group_id(user)
 
-            search_kwargs = {
-                "query": sanitized_query,
-                "config": search_config,
-            }
-            if group_id is not None:
-                search_kwargs["group_ids"] = [group_id]
+            # Generate group_id using configured method (email or user ID)
+            group_id = self._get_group_id(__user__)
+
+            # Perform search with error handling for FalkorDB/RediSearch syntax issues
+            # Measure search time
+            search_start_time = time.time()
         
-            start_time = time.time()
             try:
-                results = await self.graphiti.search_(**search_kwargs)
-            except Exception as exc:
-                search_duration = time.time() - start_time
-                if self.valves.debug_print:
-                    print(f"Graphiti search failed after {search_duration:.2f}s: {exc}")
-                    traceback.print_exc()
-                if user_valves.show_status:
-                    await event_emitter(
-                        {
-                            "type": "status",
-                            "data": {"description": f"Memory search unavailable ({search_duration:.2f}s)", "done": True},
-                        }
+                # Use search_() for advanced search that returns SearchResults with nodes, edges, episodes, communities
+                # Search configuration is determined by search_strategy setting
+                # Only pass group_ids if group_id is not None
+                if group_id is not None:
+                    results = await self.graphiti.search_(
+                        query=sanitized_query,
+                        group_ids=[group_id],
+                        config=search_config,
                     )
-                return body
-        
-            search_duration = time.time() - start_time
-        
-            if self.valves.debug_print:
-                print(f"Graphiti search completed in {search_duration:.2f}s")
-            if not results or (len(results.nodes) == 0 and len(results.edges) == 0):
+                else:
+                    results = await self.graphiti.search_(
+                        query=sanitized_query,
+                        config=search_config,
+                    )
+
+                # Calculate search duration
+                search_duration = time.time() - search_start_time
+
                 if self.valves.debug_print:
-                    print("No relevant memories found.")
+                    print(f"Search completed in {search_duration:.2f}s")
+            except Exception as e:
+                search_duration = time.time() - search_start_time
+                error_msg = str(e)
+                if "Syntax error" in error_msg or "RediSearch" in error_msg:
+                    print(f"FalkorDB/RediSearch syntax error during search (after {search_duration:.2f}s): {error_msg}")
+                    if user_valves.show_status:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": f"Memory search unavailable (syntax error, {search_duration:.2f}s)", "done": True},
+                            }
+                        )
+                else:
+                    print(f"Unexpected error during Graphiti search (after {search_duration:.2f}s): {e}")
+                    if user_valves.show_status:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": f"Memory search failed ({search_duration:.2f}s)", "done": True},
+                            }
+                        )
+                return body
+
+            # Check if any results were found
+            if len(results.edges) == 0 and len(results.nodes) == 0:
                 if user_valves.show_status:
-                    await event_emitter(
+                    await __event_emitter__(
                         {
                             "type": "status",
                             "data": {"description": f"No relevant memories found ({search_duration:.2f}s)", "done": True},
@@ -1019,63 +1042,86 @@ class Pipeline:
                     )
                 return body
         
+            # Print search results (if debug mode enabled)
+            if self.valves.debug_print:
+                print('\nSearch Results:')
+
             facts = []
-            entities = {}
+            entities = {}  # Dictionary to store unique entities: {name: summary}
         
+            # Process EntityEdge results (relations/facts) only if enabled
             if user_valves.inject_facts:
                 for idx, result in enumerate(results.edges, 1):
-                    if result.fact:
-                        facts.append((result.fact, result.valid_at, result.invalid_at, result.name))
-                        if self.valves.debug_print:
-                            print(f"Edge UUID: {result.uuid}")
-                            print(f"Fact({result.name}): {result.fact}")
-                            print(f"Valid From: {result.valid_at}, Until: {result.invalid_at}")
-                        if user_valves.show_status:
-                            await event_emitter(
-                                {
-                                    "type": "status",
-                                    "data": {"description": f"📘 Fact {idx}/{len(results.edges)}: {result.fact}", "done": False},
-                                }
-                            )
+                    if self.valves.debug_print:
+                        print(f'Edge UUID: {result.uuid}')
+                        print(f'Fact({result.name}): {result.fact}')
+                        if hasattr(result, 'valid_at') and result.valid_at:
+                            print(f'Valid from: {result.valid_at}')
+                        if hasattr(result, 'invalid_at') and result.invalid_at:
+                            print(f'Valid until: {result.invalid_at}')
+
+                    facts.append((result.fact, result.valid_at, result.invalid_at, result.name))
+
+                    # Emit status for each fact found
+                    if user_valves.show_status:
+                        emoji = "🔚" if result.invalid_at else "🔛"
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": f"{emoji} Fact {idx}/{len(results.edges)}: {result.fact}", "done": False},
+                            }
+                        )
+
                     if self.valves.debug_print:
                         print('---')
             else:
                 if self.valves.debug_print:
-                    print(f"Skipping {len(results.edges)} facts (inject_facts is disabled)")
+                    print(f'Skipping {len(results.edges)} facts (inject_facts is disabled)')
         
+            # Process EntityNode results (entities with summaries) only if enabled
             if user_valves.inject_entities:
                 for idx, result in enumerate(results.nodes, 1):
                     if self.valves.debug_print:
-                        print(f"Node UUID: {result.uuid}")
-                        print(f"Entity({result.name}): {result.summary}")
+                        print(f'Node UUID: {result.uuid}')
+                        print(f'Entity({result.name}): {result.summary}')
+
+                    # Store entity information
                     if result.name and result.summary:
                         entities[result.name] = result.summary
+
+                        # Emit status for each entity found
                         if user_valves.show_status:
-                            await event_emitter(
+                            await __event_emitter__(
                                 {
                                     "type": "status",
                                     "data": {"description": f"👤 Entity {idx}/{len(results.nodes)}: {result.name} - {result.summary}", "done": False},
                                 }
                             )
+                        
                     if self.valves.debug_print:
                         print('---')
             else:
                 if self.valves.debug_print:
-                    print(f"Skipping {len(results.nodes)} entities (inject_entities is disabled)")
+                    print(f'Skipping {len(results.nodes)} entities (inject_entities is disabled)')
         
+
+            # Insert memory message if we have facts OR entities
             if len(facts) > 0 or len(entities) > 0:
+                # Find the index of the last user message
                 last_user_msg_index = None
                 for i in range(len(body['messages']) - 1, -1, -1):
                     if body['messages'][i].get("role") == "user":
                         last_user_msg_index = i
                         break
         
+                # Determine the role to use for memory message (default to system if invalid value)
                 memory_role = self.valves.memory_message_role.lower()
                 if memory_role not in ["system", "user"]:
                     if self.valves.debug_print:
                         print(f"Invalid memory_message_role '{memory_role}', using 'system'")
                     memory_role = "system"
         
+                # Format memory content with improved structure
                 memory_content = "FACTS and ENTITIES represent relevant context to the current conversation.  \n"
                 
                 # Add facts section if any facts were found
@@ -1085,6 +1131,7 @@ class Pipeline:
                     memory_content += "<FACTS>  \n"
                     
                     for fact, valid_at, invalid_at, name in facts:
+                        # Format date range
                         valid_str = str(valid_at) if valid_at else "unknown"
                         invalid_str = str(invalid_at) if invalid_at else "present"
                         
@@ -1127,7 +1174,7 @@ class Pipeline:
                     
                     status_msg = "🧠 " + " and ".join(status_parts) + f" found ({search_duration:.2f}s)"
                     
-                    await event_emitter(
+                    await __event_emitter__(
                         {
                             "type": "status",
                             "data": {"description": status_msg, "done": True},
@@ -1143,45 +1190,56 @@ class Pipeline:
         body: dict,
         user: Optional[dict] = None,
         metadata: Optional[dict] = None,
-        event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
+        event_emitter: Optional[Callable[[dict], Any]] = None,
     ) -> dict:
-        metadata = self._build_metadata(body, metadata, user)
-        event_emitter = event_emitter or self._noop_event_emitter
-        user_valves: Pipeline.UserValves = self.UserValves()
-        if user:
-            user_valves = user.get("valves", self.UserValves())
+        __user__ = user
+        __metadata__ = metadata
+            
+        async def __event_emitter__(payload: dict) -> None:
+            await self._emit(event_emitter, payload)
+
+        # Check if user has disabled the feature
+        if __user__:
+            user_valves: Pipeline.UserValves = __user__.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
         
+        # Check if graphiti is initialized, retry if not
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory addition.")
             return body
             
-        if user is None:
+        if __user__ is None:
             if self.valves.debug_print:
                 print("User information is not available. Skipping memory addition.")
             return body
-        
-        chat_id = metadata.get('chat_id', 'unknown')
-        message_id = metadata.get('message_id', 'unknown')
+        chat_id = __metadata__.get('chat_id', 'unknown') if __metadata__ else 'unknown'
+        message_id = __metadata__.get('message_id', 'unknown') if __metadata__ else 'unknown'
         if self.valves.debug_print:
             print(f"outlet:{__name__}, chat_id:{chat_id}, message_id:{message_id}")
         
+        # Set user headers in context variable (before any API calls)
         token = None
-        try:
-            headers = self._get_user_info_headers(user, chat_id)
+        headers = self._get_user_info_headers(__user__, chat_id)
+        if headers:
             token = user_headers_context.set(headers)
-            if self.valves.debug_print and headers:
+            if self.valves.debug_print:
                 print(f"Set user headers in context: {list(headers.keys())}")
-    
+
+
+        try:
+            user_valves: Pipeline.UserValves = __user__.get("valves", self.UserValves())
             messages = body.get("messages", [])
             if len(messages) == 0:
                 return body
             
+            # Determine which messages to save based on settings
             messages_to_save = []
+
+            # Find the last user message, last assistant message, and previous assistant message
             last_user_message = None
             last_assistant_message = None
             previous_assistant_message = None
@@ -1191,13 +1249,16 @@ class Pipeline:
                     last_user_message = msg
                 elif msg.get("role") == "assistant":
                     if last_user_message is None:
+                        # This is after the last user message (the latest assistant response)
                         if last_assistant_message is None:
                             last_assistant_message = msg
                     else:
+                        # This is before the last user message (the assistant message user is responding to)
                         if previous_assistant_message is None:
                             previous_assistant_message = msg
-                            break
+                            break  # We found everything we need
             
+            # Build messages_to_save list based on UserValves settings
             if user_valves.save_previous_assistant_message and previous_assistant_message:
                 previous_assistant_content = self._get_content_from_message(previous_assistant_message)
                 if previous_assistant_content:
@@ -1223,9 +1284,10 @@ class Pipeline:
                         else:
                             user_content_block = f"Retrieved Context:\n{rag_context_block}"
             
-            if user_valves.save_user_message and last_user_message and user_content_block:
-                messages_to_save.append(("user", user_content_block))
-            
+            if user_valves.save_user_message and last_user_message:
+                if user_content_block:
+                    messages_to_save.append(("user", user_content_block))
+
             if user_valves.save_assistant_response and last_assistant_message:
                 assistant_content = self._get_content_from_message(last_assistant_message)
                 if assistant_content:
@@ -1234,14 +1296,17 @@ class Pipeline:
             if len(messages_to_save) == 0:
                 return body
             
+            # Construct episode body in "Assistant: {message}\nUser: {message}\nAssistant: {message}" format for EpisodeType.message
+            # Sort messages to maintain chronological order: previous_assistant -> user -> assistant
             role_order = {"previous_assistant": 0, "user": 1, "assistant": 2}
             messages_to_save.sort(key=lambda x: role_order.get(x[0], 99))
             
             episode_parts = []
             for role, content in messages_to_save:
                 if role == "user":
-                    if self.valves.use_user_name_in_episode and user.get('name'):
-                        role_label = user['name']
+                    # Use actual user name if enabled, otherwise use "User"
+                    if self.valves.use_user_name_in_episode and __user__.get('name'):
+                        role_label = __user__['name']
                     else:
                         role_label = "User"
                 elif role in ("assistant", "previous_assistant"):
@@ -1253,18 +1318,22 @@ class Pipeline:
             episode_body = "\n".join(episode_parts)
             
             if user_valves.show_status:
-                await event_emitter(
+                await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "✍️ Adding conversation to Graphiti memory...", "done": False},
+                        "data": {"description": f"✍️ Adding conversation to Graphiti memory...", "done": False},
                     }
                 )
             
-            group_id = self._get_group_id(user)
+            # Generate group_id using configured method (email or user ID)
+            group_id = self._get_group_id(__user__)
             saved_count = 0
+
+            # Store add_episode results for detailed status display
             add_results = None
             
             try:
+                # Apply timeout if configured
                 if self.valves.add_episode_timeout > 0:
                     if group_id is not None:
                         add_results = await asyncio.wait_for(
@@ -1311,33 +1380,83 @@ class Pipeline:
                             reference_time=datetime.now(),
                             update_communities=self.valves.update_communities,
                         )
-                saved_count = 1
-            except asyncio.TimeoutError:
                 if self.valves.debug_print:
-                    print(f"add_episode timed out after {self.valves.add_episode_timeout}s")
+                    print(f"Added conversation to Graphiti memory: {episode_body[:100]}...")
+                    if add_results:
+                        print(f"Extracted {len(add_results.nodes)} entities and {len(add_results.edges)} relationships")
+                saved_count = 1
+
+                # Display extracted entities and facts in status
+                if user_valves.show_status and add_results:
+                    # Show all Facts
+                    if add_results.edges:
+                        for idx, edge in enumerate(add_results.edges, 1):
+                            emoji = "🔚" if edge.invalid_at else "🔛"
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {"description": f"{emoji} Fact {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
+                                }
+                            )
+
+                    # Show all entities
+                    if add_results.nodes:
+                        for idx, node in enumerate(add_results.nodes, 1):
+                            # Display entity name and summary (if available)
+                            entity_display = f"{node.name}"
+                            if hasattr(node, 'summary') and node.summary:
+                                entity_display += f" - {node.summary}"
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {"description": f"👤 Entity {idx}/{len(add_results.nodes)}: {entity_display}", "done": False},
+                                }
+                            )
+            except asyncio.TimeoutError:
+                print(f"Timeout adding conversation to Graphiti memory after {self.valves.add_episode_timeout}s")
                 if user_valves.show_status:
-                    await event_emitter(
+                    await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "⚠️ Graphiti add_episode timed out", "done": True},
+                            "data": {"description": f"Warning: Memory save timed out", "done": False},
                         }
                     )
             except Exception as e:
-                if self.valves.debug_print:
-                    print(f"Error saving to Graphiti: {e}")
+                error_type = type(e).__name__
+                error_msg = str(e)
+
+                # Provide more specific error messages for common issues
+                if "ValidationError" in error_type:
+                    print(f"Graphiti LLM response validation error for conversation: {error_msg}")
+                    user_msg = "Graphiti: LLM response format error (will retry on next message)"
+                elif "ConnectionError" in error_type or "timeout" in error_msg.lower():
+                    print(f"Graphiti connection error adding conversation: {error_msg}")
+                    user_msg = "Graphiti: Connection error (temporary)"
+                else:
+                    print(f"Graphiti error adding conversation: {e}")
+                    user_msg = f"Graphiti: Memory save failed ({error_type})"
+
+                # Only print full traceback for unexpected errors
+                if "ValidationError" not in error_type:
                     traceback.print_exc()
+
                 if user_valves.show_status:
-                    await event_emitter(
+                    await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": f"⚠️ Error saving to Graphiti: {str(e)}", "done": True},
+                            "data": {"description": f"Warning: {user_msg}", "done": False},
                         }
                     )
             
+            # Only increment count for successfully saved messages
+            if saved_count > 0:
+                pass  # Successfully saved messages
+
             if user_valves.show_status:
                 if saved_count == 0:
                     status_msg = "❌ Failed to save conversation to Graphiti memory"
                 else:
+                    # Build detailed status message with entity and relationship counts
                     status_parts = ["✅ Added conversation to Graphiti memory"]
                     if add_results:
                         detail_parts = []
@@ -1352,7 +1471,7 @@ class Pipeline:
                     else:
                         status_msg = status_parts[0]
                 
-                await event_emitter(
+                await __event_emitter__(
                     {
                         "type": "status",
                         "data": {"description": status_msg, "done": True},
