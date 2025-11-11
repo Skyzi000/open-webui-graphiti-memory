@@ -365,6 +365,10 @@ class Filter:
             default=True,
             description="Inject entities (EntityNode summaries) from memory search results.",
         )
+        search_history_turns: int = Field(
+            default=1,
+            description="How many of the most recent user/assistant messages to include in the Graphiti search query. 1 uses only the latest user message, 2 also appends the assistant reply before it, 3 adds the previous user turn, and so on. Values <= 0 include as many alternating user/assistant messages as possible, still respecting the max_search_message_length limit. Messages from other roles are ignored.",
+        )
 
 
     def __init__(self):
@@ -715,6 +719,74 @@ class Filter:
         # Handle string format
         return content if isinstance(content, str) else ""
     
+    def _build_search_history_query(
+        self,
+        messages: list[dict],
+        history_turns: int,
+        max_chars: int,
+    ) -> Optional[str]:
+        """
+        Build a chronological snippet of the most recent conversation turns for Graphiti search.
+        
+        Args:
+            messages: Full conversation message list.
+            history_turns: Number of user/assistant messages to include. Values <= 0 include all.
+            max_chars: Character budget used to stop collecting additional turns (<=0 disables).
+        
+        Returns:
+            String formatted as alternating "User | ..." / "Assistant | ..." blocks, or None if no user turn found.
+        """
+        if not messages:
+            return None
+        
+        turn_limit = history_turns if history_turns and history_turns > 0 else None
+        char_limit = max_chars if isinstance(max_chars, int) and max_chars > 0 else None
+        separator = "\n\n"
+        collected: list[str] = []
+        total_chars = 0
+        turns_collected = 0
+        found_latest_user = False
+        
+        for idx in range(len(messages) - 1, -1, -1):
+            message = messages[idx]
+            role = message.get("role")
+            
+            if not found_latest_user:
+                if role != "user":
+                    continue
+                found_latest_user = True
+                is_latest_user = True
+            else:
+                if role not in {"user", "assistant"}:
+                    continue
+                is_latest_user = False
+            
+            text = self._get_content_from_message(message)
+            if text is None or len(text) == 0:
+                if is_latest_user:
+                    # Latest user message has no text, treat as missing to match previous behavior
+                    return None
+                continue
+            
+            role_label = "User" if role == "user" else "Assistant"
+            segment = f"{role_label} | {text}"
+            
+            addition = len(segment) if not collected else len(separator) + len(segment)
+            collected.append(segment)
+            turns_collected += 1
+            total_chars += addition
+            
+            if turn_limit is not None and turns_collected >= turn_limit:
+                break
+            
+            if char_limit is not None and total_chars >= char_limit:
+                break
+        
+        if not collected:
+            return None
+        
+        return separator.join(reversed(collected))
+    
     def _extract_rag_sources_text(
         self,
         message: Optional[dict],
@@ -846,9 +918,10 @@ class Filter:
             print(f"inlet:{__name__}")
             print(f"inlet:user:{__user__}")
         
+        user_valves: Filter.UserValves = self.UserValves()
         # Check if user has disabled the feature
         if __user__:
-            user_valves: Filter.UserValves = __user__.get("valves", self.UserValves())
+            user_valves = __user__.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
@@ -858,7 +931,7 @@ class Filter:
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory search.")
-            if __user__ and __user__.get("valves", self.UserValves()).show_status:
+            if __user__ and user_valves.show_status:
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -889,37 +962,34 @@ class Filter:
                 print("Detected 'Continue Response' action (last message is assistant). Skipping memory search.")
             return body
         
-        # Find the last user message (ignore assistant/tool messages)
-        user_message = None
-        original_length = 0
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                # Extract text content from message (handles both string and list formats)
-                user_message = self._get_content_from_message(msg)
-                original_length = len(user_message) if user_message else 0
-                break
+        max_length = self.valves.max_search_message_length
+        history_turns = getattr(user_valves, "search_history_turns", 1)
+        search_source_text = self._build_search_history_query(
+            messages,
+            history_turns,
+            max_length,
+        )
         
-        if not user_message:
+        if not search_source_text:
             if self.valves.debug_print:
                 print("No user message found. Skipping memory search.")
             return body
         
         # Sanitize query for FalkorDB/RediSearch compatibility (before truncation)
-        sanitized_query = user_message
+        sanitized_query = search_source_text
         if self.valves.sanitize_search_query:
-            sanitized_query = self._sanitize_search_query(user_message)
+            sanitized_query = self._sanitize_search_query(search_source_text)
             if not sanitized_query:
                 if self.valves.debug_print:
                     print("Search query is empty after sanitization. Skipping memory search.")
                 return body
             
-            if sanitized_query != user_message:
+            if sanitized_query != search_source_text:
                 if self.valves.debug_print:
                     print(f"Search query sanitized: removed problematic characters")
         
         # Truncate message if too long (keep first and last parts, drop middle)
-        original_length = len(sanitized_query)
-        max_length = self.valves.max_search_message_length
+        pre_trunc_length = len(sanitized_query)
         if max_length > 0 and len(sanitized_query) > max_length:
             keep_length = max_length // 2 - 25  # Leave room for separator
             sanitized_query = (
@@ -928,9 +998,7 @@ class Filter:
                 + sanitized_query[-keep_length:]
             )
             if self.valves.debug_print:
-                print(f"User message truncated from {original_length} to {len(sanitized_query)} characters")
-            
-        user_valves: Filter.UserValves = __user__.get("valves", self.UserValves())
+                print(f"Search query truncated from {pre_trunc_length} to {len(sanitized_query)} characters")
         
         # Get search configuration based on strategy
         search_config = self._get_search_config()
