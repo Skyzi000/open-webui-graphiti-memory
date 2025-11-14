@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Unlike filters, this pipeline can run on a dedicated pipelines server separate from the main Open WebUI instance while still exposing inlet/outlet hooks to Open WebUI. Important limitations: (1) Open WebUI pipelines currently never receive per-user UserValves, so end users always inherit the defaults defined below, and (2) the core does not forward __event_emitter__ into pipelines, so status updates must fall back to local no-op emitters. If you require per-user settings or live status updates, use the filter implementation instead.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.7
+version: 0.7.1
 requirements: graphiti-core[falkordb]
 
 Design:
