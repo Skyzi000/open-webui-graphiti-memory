@@ -376,12 +376,9 @@ class Filter:
         self.graphiti = None
         self._indices_built = False  # Track if indices have been built
         self._last_config = None  # Track configuration for change detection
-        # Try to initialize, but it's okay if it fails - will retry later
-        try:
-            self._initialize_graphiti()
-        except Exception as e:
-            if self.valves.debug_print:
-                print(f"Initial Graphiti initialization skipped (will retry on first use): {e}")
+        # Defer Graphiti initialization until inlet()/outlet() needs it
+        if self.valves.debug_print:
+            print("Graphiti initialization deferred until first use")
     
     def _get_config_hash(self) -> str:
         """
