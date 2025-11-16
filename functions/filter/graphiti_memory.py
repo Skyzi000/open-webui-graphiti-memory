@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.9.1
+version: 0.10.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -352,6 +352,10 @@ class Filter:
         rich_html_citations: bool = Field(
             default=True,
             description="Render citation results as rich HTML with interactive graph visualizations. When disabled, uses plain text format.",
+        )
+        show_citation_parameters: bool = Field(
+            default=False,
+            description="Include detailed metadata parameters (type, index, valid_from, etc.) in citation events.",
         )
         save_user_message: bool = Field(
             default=True,
@@ -866,6 +870,7 @@ class Filter:
         total: int,
         entity_lookup: dict[str, dict[str, str]],
         use_rich_html: bool = True,
+        include_parameters: bool = False,
     ) -> Optional[dict]:
         """Convert a Graphiti fact result into a citation payload for Open WebUI."""
         fact_text = getattr(result, "fact", None)
@@ -883,16 +888,24 @@ class Filter:
         if valid_until:
             metadata["valid_until"] = str(valid_until)
 
-        parameters = self._build_graphiti_parameters(
-            kind="fact",
-            name=getattr(result, "name", None),
-            index=idx,
-            total=total,
-            valid_from=valid_from,
-            valid_until=valid_until,
-        )
-        if parameters:
-            metadata["parameters"] = parameters
+        if include_parameters:
+            parameters = self._build_fact_parameters(
+                index=idx,
+                total=total,
+                uuid=getattr(result, "uuid", None),
+                group_id=getattr(result, "group_id", None),
+                name=getattr(result, "name", None),
+                source_node_uuid=getattr(result, "source_node_uuid", None),
+                target_node_uuid=getattr(result, "target_node_uuid", None),
+                created_at=getattr(result, "created_at", None),
+                valid_at=valid_from,
+                invalid_at=valid_until,
+                expired_at=getattr(result, "expired_at", None),
+                episodes=getattr(result, "episodes", None),
+                attributes=getattr(result, "attributes", None),
+            )
+            if parameters:
+                metadata["parameters"] = parameters
 
         if use_rich_html:
             graph_html = self._render_fact_graph_html(
@@ -929,6 +942,7 @@ class Filter:
         entity_lookup: dict[str, dict[str, str]],
         entity_connections: dict[str, list[dict[str, Any]]],
         use_rich_html: bool = True,
+        include_parameters: bool = False,
     ) -> Optional[dict]:
         """Convert a Graphiti entity result into a citation payload for Open WebUI."""
         name = getattr(result, "name", None)
@@ -939,14 +953,19 @@ class Filter:
         source_id = self.valves.citation_source_id or "graphiti-memory"
         metadata: dict[str, Any] = {"source": source_id}
 
-        parameters = self._build_graphiti_parameters(
-            kind="entity",
-            name=name,
-            index=idx,
-            total=total,
-        )
-        if parameters:
-            metadata["parameters"] = parameters
+        if include_parameters:
+            parameters = self._build_entity_parameters(
+                index=idx,
+                total=total,
+                uuid=getattr(result, "uuid", None),
+                group_id=getattr(result, "group_id", None),
+                name=name,
+                labels=getattr(result, "labels", None),
+                created_at=getattr(result, "created_at", None),
+                attributes=getattr(result, "attributes", None),
+            )
+            if parameters:
+                metadata["parameters"] = parameters
 
         if use_rich_html:
             entity_uuid = getattr(result, "uuid", None)
@@ -980,28 +999,82 @@ class Filter:
         }
 
     @staticmethod
-    def _build_graphiti_parameters(
-        kind: str,
-        name: Optional[str] = None,
+    def _build_fact_parameters(
+        *,
         index: Optional[int] = None,
         total: Optional[int] = None,
-        valid_from: Optional[Any] = None,
-        valid_until: Optional[Any] = None,
+        uuid: Optional[str] = None,
+        group_id: Optional[str] = None,
+        name: Optional[str] = None,
+        source_node_uuid: Optional[str] = None,
+        target_node_uuid: Optional[str] = None,
+        created_at: Optional[Any] = None,
+        valid_at: Optional[Any] = None,
+        invalid_at: Optional[Any] = None,
+        expired_at: Optional[Any] = None,
+        episodes: Optional[list[str]] = None,
+        attributes: Optional[dict[str, Any]] = None,
     ) -> Optional[dict]:
-        """Pack Graphiti detail fields into metadata.parameters so the UI can display them."""
-        payload: dict[str, Any] = {
-            "type": kind,
-        }
-        if name:
-            payload["name"] = name
+        """Pack Graphiti EntityEdge fields into metadata.parameters."""
+        payload: dict[str, Any] = {"type": "fact"}
         if isinstance(index, int):
             payload["index"] = index
         if isinstance(total, int):
             payload["total"] = total
-        if valid_from:
-            payload["valid_from"] = str(valid_from)
-        if valid_until:
-            payload["valid_until"] = str(valid_until)
+        if uuid:
+            payload["uuid"] = str(uuid)
+        if group_id:
+            payload["group_id"] = str(group_id)
+        if name:
+            payload["name"] = name
+        if source_node_uuid:
+            payload["source_node_uuid"] = str(source_node_uuid)
+        if target_node_uuid:
+            payload["target_node_uuid"] = str(target_node_uuid)
+        if created_at:
+            payload["created_at"] = str(created_at)
+        if valid_at:
+            payload["valid_at"] = str(valid_at)
+        if invalid_at:
+            payload["invalid_at"] = str(invalid_at)
+        if expired_at:
+            payload["expired_at"] = str(expired_at)
+        if episodes:
+            payload["episodes"] = episodes
+        if attributes:
+            payload["attributes"] = attributes
+        return {"graphiti": payload} if len(payload) > 1 else None
+
+    @staticmethod
+    def _build_entity_parameters(
+        *,
+        index: Optional[int] = None,
+        total: Optional[int] = None,
+        uuid: Optional[str] = None,
+        group_id: Optional[str] = None,
+        name: Optional[str] = None,
+        labels: Optional[list[str]] = None,
+        created_at: Optional[Any] = None,
+        attributes: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict]:
+        """Pack Graphiti EntityNode fields into metadata.parameters."""
+        payload: dict[str, Any] = {"type": "entity"}
+        if isinstance(index, int):
+            payload["index"] = index
+        if isinstance(total, int):
+            payload["total"] = total
+        if uuid:
+            payload["uuid"] = str(uuid)
+        if group_id:
+            payload["group_id"] = str(group_id)
+        if name:
+            payload["name"] = name
+        if labels:
+            payload["labels"] = labels
+        if created_at:
+            payload["created_at"] = str(created_at)
+        if attributes:
+            payload["attributes"] = attributes
         return {"graphiti": payload} if len(payload) > 1 else None
 
     async def _build_entity_lookup(
@@ -2523,6 +2596,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         len(results.edges),
                         entity_lookup,
                         use_rich_html=user_valves.rich_html_citations,
+                        include_parameters=user_valves.show_citation_parameters,
                     )
                     if fact_citation:
                         await __event_emitter__(
@@ -2558,6 +2632,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             entity_lookup,
                             entity_connections,
                             use_rich_html=user_valves.rich_html_citations,
+                            include_parameters=user_valves.show_citation_parameters,
                         )
                         if entity_citation:
                             await __event_emitter__(
