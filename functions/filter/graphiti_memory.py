@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.7.1
+version: 0.8.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -325,6 +325,14 @@ class Filter:
             default=False,
             description="Enable debug printing to console. When enabled, prints detailed information about search results, memory injection, and processing steps. Useful for troubleshooting.",
         )
+        citation_source_id: str = Field(
+            default="graphiti-memory",
+            description="Source ID used for emitted citation events (controls grouping in the UI).",
+        )
+        citation_source_name: str = Field(
+            default="Graphiti Memory",
+            description="Source display name used for emitted citation events.",
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -333,6 +341,10 @@ class Filter:
         )
         show_status: bool = Field(
             default=True, description="Show status of the action."
+        )
+        show_citation: bool = Field(
+            default=True,
+            description="Emit retrieval results as citation events (affects fact/entity previews).",
         )
         save_user_message: bool = Field(
             default=True,
@@ -369,7 +381,6 @@ class Filter:
             default=1,
             description="How many of the most recent user/assistant messages to include in the Graphiti search query. 1 uses only the latest user message, 2 also appends the assistant reply before it, 3 adds the previous user turn, and so on. Values <= 0 include as many alternating user/assistant messages as possible, still respecting the max_search_message_length limit. Messages from other roles are ignored.",
         )
-
 
     def __init__(self):
         self.valves = self.Valves()
@@ -840,6 +851,109 @@ class Filter:
                 sections.append(f"{heading}\n{document_text.strip()}")
         
         return "\n\n".join(section for section in sections if section.strip())
+
+    def _build_fact_citation_event(
+        self,
+        result: Any,
+        idx: int,
+        total: int,
+    ) -> Optional[dict]:
+        """Convert a Graphiti fact result into a citation payload for Open WebUI."""
+        fact_text = getattr(result, "fact", None)
+        if not fact_text:
+            return None
+
+        emoji = "🔚" if getattr(result, "invalid_at", None) else "🔛"
+        source_id = self.valves.citation_source_id or "graphiti-memory"
+        source_name = self.valves.citation_source_name or "Graphiti Memory"
+
+        metadata: dict[str, Any] = {"source": source_id}
+        valid_from = getattr(result, "valid_at", None)
+        if valid_from:
+            metadata["valid_from"] = str(valid_from)
+        valid_until = getattr(result, "invalid_at", None)
+        if valid_until:
+            metadata["valid_until"] = str(valid_until)
+
+        parameters = self._build_graphiti_parameters(
+            kind="fact",
+            name=getattr(result, "name", None),
+            index=idx,
+            total=total,
+            valid_from=valid_from,
+            valid_until=valid_until,
+        )
+        if parameters:
+            metadata["parameters"] = parameters
+
+        return {
+            "source": {
+                "id": source_id,
+                "name": source_name,
+                "type": "graphiti_memory",
+            },
+            "document": [f"{emoji} Fact {idx}/{total}: {fact_text}"],
+            "metadata": [metadata],
+        }
+
+    def _build_entity_citation_event(
+        self,
+        result: Any,
+        idx: int,
+        total: int,
+    ) -> Optional[dict]:
+        """Convert a Graphiti entity result into a citation payload for Open WebUI."""
+        name = getattr(result, "name", None)
+        summary = getattr(result, "summary", None)
+        if not name or not summary:
+            return None
+
+        source_id = self.valves.citation_source_id or "graphiti-memory"
+        metadata: dict[str, Any] = {"source": source_id}
+
+        parameters = self._build_graphiti_parameters(
+            kind="entity",
+            name=name,
+            index=idx,
+            total=total,
+        )
+        if parameters:
+            metadata["parameters"] = parameters
+
+        return {
+            "source": {
+                "id": source_id,
+                "name": self.valves.citation_source_name or "Graphiti Memory",
+                "type": "graphiti_memory",
+            },
+            "document": [f"👤 Entity {idx}/{total}: {name} - {summary}"],
+            "metadata": [metadata],
+        }
+
+    @staticmethod
+    def _build_graphiti_parameters(
+        kind: str,
+        name: Optional[str] = None,
+        index: Optional[int] = None,
+        total: Optional[int] = None,
+        valid_from: Optional[Any] = None,
+        valid_until: Optional[Any] = None,
+    ) -> Optional[dict]:
+        """Pack Graphiti detail fields into metadata.parameters so the UI can display them."""
+        payload: dict[str, Any] = {
+            "type": kind,
+        }
+        if name:
+            payload["name"] = name
+        if isinstance(index, int):
+            payload["index"] = index
+        if isinstance(total, int):
+            payload["total"] = total
+        if valid_from:
+            payload["valid_from"] = str(valid_from)
+        if valid_until:
+            payload["valid_until"] = str(valid_until)
+        return {"graphiti": payload} if len(payload) > 1 else None
     
     @staticmethod
     def _parse_allowed_source_types(value: Any) -> Optional[set[str]]:
@@ -1094,15 +1208,20 @@ class Filter:
 
                 facts.append((result.fact, result.valid_at, result.invalid_at, result.name))
                 
-                # Emit status for each fact found
-                if user_valves.show_status:
-                    emoji = "🔚" if result.invalid_at else "🔛"
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {"description": f"{emoji} Fact {idx}/{len(results.edges)}: {result.fact}", "done": False},
-                        }
+                # Emit citation for each fact found when citations are enabled
+                if user_valves.show_citation:
+                    fact_citation = self._build_fact_citation_event(
+                        result,
+                        idx,
+                        len(results.edges),
                     )
+                    if fact_citation:
+                        await __event_emitter__(
+                            {
+                                "type": "citation",
+                                "data": fact_citation,
+                            }
+                        )
                 
                 if self.valves.debug_print:
                     print('---')
@@ -1121,14 +1240,20 @@ class Filter:
                 if result.name and result.summary:
                     entities[result.name] = result.summary
                     
-                    # Emit status for each entity found
-                    if user_valves.show_status:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {"description": f"👤 Entity {idx}/{len(results.nodes)}: {result.name} - {result.summary}", "done": False},
-                            }
+                    # Emit citation for each entity found when citations are enabled
+                    if user_valves.show_citation:
+                        entity_citation = self._build_entity_citation_event(
+                            result,
+                            idx,
+                            len(results.nodes),
                         )
+                        if entity_citation:
+                            await __event_emitter__(
+                                {
+                                    "type": "citation",
+                                    "data": entity_citation,
+                                }
+                            )
                 
                 if self.valves.debug_print:
                     print('---')
