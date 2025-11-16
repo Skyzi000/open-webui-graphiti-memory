@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.10.5
+version: 0.11.1
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -336,6 +336,10 @@ class Filter:
             default="Graphiti Memory",
             description="Source display name used for emitted citation events.",
         )
+        citation_retention_seconds: int = Field(
+            default=600,
+            description="How long (in seconds) to keep pending citation events before auto-cleanup if the outlet never runs.",
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -398,6 +402,8 @@ class Filter:
         self.graphiti = None
         self._indices_built = False  # Track if indices have been built
         self._last_config = None  # Track configuration for change detection
+        self._pending_citations: dict[tuple[str, str], dict[str, Any]] = {}
+        self._pending_citations_lock = asyncio.Lock()
         # Defer Graphiti initialization until inlet()/outlet() needs it
         if self.valves.debug_print:
             print("Graphiti initialization deferred until first use")
@@ -862,6 +868,96 @@ class Filter:
                 sections.append(f"{heading}\n{document_text.strip()}")
         
         return "\n\n".join(section for section in sections if section.strip())
+
+    def _get_citation_bucket_key(
+        self,
+        __metadata__: Optional[dict],
+    ) -> Optional[tuple[str, str]]:
+        """
+        Build a tuple key that uniquely identifies a single assistant response so pending
+        citation events can be flushed later in outlet() even when multiple models run in parallel.
+        """
+        if not __metadata__:
+            return None
+
+        chat_id = __metadata__.get("chat_id")
+        message_id = __metadata__.get("message_id")
+        if not chat_id or not message_id:
+            return None
+
+        return (
+            str(chat_id),
+            str(message_id),
+        )
+
+    def _cleanup_expired_citations_locked(self, now: Optional[float] = None) -> None:
+        """
+        Remove citation buckets that exceeded the retention window. Caller must hold the lock.
+        """
+        if now is None:
+            now = time.time()
+
+        ttl = int(self.valves.citation_retention_seconds or 0)
+        if ttl <= 0:
+            return
+
+        cutoff = now - ttl
+        stale_keys = [
+            key for key, bucket in self._pending_citations.items() if bucket.get("created_at", now) < cutoff
+        ]
+        for key in stale_keys:
+            self._pending_citations.pop(key, None)
+
+    async def _queue_citation_event(
+        self,
+        event_payload: dict,
+        __metadata__: Optional[dict],
+    ) -> bool:
+        """
+        Store a citation event until outlet() flushes it so we don't conflict with
+        web-search citations that arrive later.
+        """
+        key = self._get_citation_bucket_key(__metadata__)
+        if key is None:
+            if self.valves.debug_print:
+                print("Unable to queue citation event (missing metadata identifiers)")
+            return False
+
+        now = time.time()
+        async with self._pending_citations_lock:
+            self._cleanup_expired_citations_locked(now)
+            bucket = self._pending_citations.get(key)
+            if not bucket:
+                bucket = {"created_at": now, "items": []}
+                self._pending_citations[key] = bucket
+            bucket["items"].append(event_payload)
+        return True
+
+    async def _flush_pending_citations(
+        self,
+        __event_emitter__: Callable[[Any], Awaitable[None]],
+        __metadata__: Optional[dict],
+    ) -> None:
+        """
+        Emit and clear any citation events queued for the current response.
+        """
+        key = self._get_citation_bucket_key(__metadata__)
+        if key is None:
+            return
+
+        async with self._pending_citations_lock:
+            bucket = self._pending_citations.pop(key, None)
+            self._cleanup_expired_citations_locked()
+
+        if not bucket:
+            return
+
+        for event_payload in bucket.get("items", []):
+            try:
+                await __event_emitter__(event_payload)
+            except Exception as e:
+                if self.valves.debug_print:
+                    print(f"Failed to emit queued citation: {e}")
 
     def _build_fact_citation_event(
         self,
@@ -2592,11 +2688,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 edges=results.edges,
             )
             if overview_citation:
-                await __event_emitter__(
+                await self._queue_citation_event(
                     {
                         "type": "citation",
                         "data": overview_citation,
-                    }
+                    },
+                    __metadata__,
                 )
         
         # Process EntityEdge results (relations/facts) only if enabled
@@ -2623,11 +2720,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         include_parameters=user_valves.show_citation_parameters,
                     )
                     if fact_citation:
-                        await __event_emitter__(
+                        await self._queue_citation_event(
                             {
                                 "type": "citation",
                                 "data": fact_citation,
-                            }
+                            },
+                            __metadata__,
                         )
                 
                 if self.valves.debug_print:
@@ -2659,11 +2757,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             include_parameters=user_valves.show_citation_parameters,
                         )
                         if entity_citation:
-                            await __event_emitter__(
+                            await self._queue_citation_event(
                                 {
                                     "type": "citation",
                                     "data": entity_citation,
-                                }
+                                },
+                                __metadata__,
                             )
                 
                 if self.valves.debug_print:
@@ -2756,6 +2855,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
     ) -> dict:
+        # Flush any pending citations immediately so they show up before long-running work
+        await self._flush_pending_citations(__event_emitter__, __metadata__)
+
         # Check if user has disabled the feature
         if __user__:
             user_valves: Filter.UserValves = __user__.get("valves", self.UserValves())
