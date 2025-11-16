@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.10.4
+version: 0.10.5
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -1291,6 +1291,10 @@ body {
 .card-heading .title {
   font-size: 1rem;
   font-weight: 600;
+  flex: 1 1 240px;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .chip {
   font-size: 0.75rem;
@@ -1331,6 +1335,8 @@ body {
 .node-title {
   font-size: 1rem;
   font-weight: 600;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .node-summary {
   font-size: 0.85rem;
@@ -1351,6 +1357,8 @@ body {
 }
 .edge-name {
   font-weight: 600;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .edge-fact {
   font-size: 0.85rem;
@@ -1380,6 +1388,8 @@ body {
 }
 .connection-relation {
   font-weight: 600;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .connection-fact {
   font-size: 0.85rem;
@@ -1388,6 +1398,8 @@ body {
 .connection-entity {
   font-size: 0.9rem;
   font-weight: 600;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .empty-state,
 .more-note,
