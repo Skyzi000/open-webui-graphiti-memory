@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.8.0
+version: 0.9.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -36,10 +36,13 @@ Architecture:
 import asyncio
 import contextvars
 import hashlib
+import html
+import json
 import os
 import re
 import time
 import traceback
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional, Callable, Awaitable, Any
 from urllib.parse import quote
@@ -52,7 +55,7 @@ from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-from graphiti_core.nodes import EpisodeType
+from graphiti_core.nodes import EpisodeType, EntityNode
 from openai import AsyncOpenAI
 from graphiti_core.search.search_config_recipes import (
     COMBINED_HYBRID_SEARCH_RRF,
@@ -857,13 +860,13 @@ class Filter:
         result: Any,
         idx: int,
         total: int,
+        entity_lookup: dict[str, dict[str, str]],
     ) -> Optional[dict]:
         """Convert a Graphiti fact result into a citation payload for Open WebUI."""
         fact_text = getattr(result, "fact", None)
         if not fact_text:
             return None
 
-        emoji = "🔚" if getattr(result, "invalid_at", None) else "🔛"
         source_id = self.valves.citation_source_id or "graphiti-memory"
         source_name = self.valves.citation_source_name or "Graphiti Memory"
 
@@ -886,13 +889,25 @@ class Filter:
         if parameters:
             metadata["parameters"] = parameters
 
+        graph_html = self._render_fact_graph_html(
+            fact_text=fact_text,
+            relation_name=getattr(result, "name", None),
+            source_entity=self._get_entity_display(entity_lookup, getattr(result, "source_node_uuid", None)),
+            target_entity=self._get_entity_display(entity_lookup, getattr(result, "target_node_uuid", None)),
+            valid_from=valid_from,
+            valid_until=valid_until,
+            idx=idx,
+            total=total,
+        )
+        metadata["html"] = graph_html
+
         return {
             "source": {
                 "id": source_id,
                 "name": source_name,
                 "type": "graphiti_memory",
             },
-            "document": [f"{emoji} Fact {idx}/{total}: {fact_text}"],
+            "document": [graph_html],
             "metadata": [metadata],
         }
 
@@ -901,6 +916,8 @@ class Filter:
         result: Any,
         idx: int,
         total: int,
+        entity_lookup: dict[str, dict[str, str]],
+        entity_connections: dict[str, list[dict[str, Any]]],
     ) -> Optional[dict]:
         """Convert a Graphiti entity result into a citation payload for Open WebUI."""
         name = getattr(result, "name", None)
@@ -920,13 +937,30 @@ class Filter:
         if parameters:
             metadata["parameters"] = parameters
 
+        entity_uuid = getattr(result, "uuid", None)
+        entity_details = self._get_entity_display(entity_lookup, entity_uuid)
+        if not entity_details.get("summary"):
+            entity_details = {
+                **entity_details,
+                "summary": summary,
+            }
+        connections = entity_connections.get(str(entity_uuid) if entity_uuid else "", [])
+
+        graph_html = self._render_entity_graph_html(
+            entity=entity_details,
+            connections=connections,
+            idx=idx,
+            total=total,
+        )
+        metadata["html"] = graph_html
+
         return {
             "source": {
                 "id": source_id,
                 "name": self.valves.citation_source_name or "Graphiti Memory",
                 "type": "graphiti_memory",
             },
-            "document": [f"👤 Entity {idx}/{total}: {name} - {summary}"],
+            "document": [graph_html],
             "metadata": [metadata],
         }
 
@@ -954,6 +988,1247 @@ class Filter:
         if valid_until:
             payload["valid_until"] = str(valid_until)
         return {"graphiti": payload} if len(payload) > 1 else None
+
+    async def _build_entity_lookup(
+        self,
+        node_results: list[Any] | None,
+        edge_results: list[Any] | None,
+    ) -> dict[str, dict[str, str]]:
+        """Resolve entity UUIDs to display-friendly name/summary pairs for visualization."""
+        lookup: dict[str, dict[str, str]] = {}
+
+        if node_results:
+            for node in node_results:
+                node_uuid = getattr(node, "uuid", None)
+                if not node_uuid:
+                    continue
+                uuid_str = str(node_uuid)
+                lookup[uuid_str] = {
+                    "uuid": uuid_str,
+                    "name": getattr(node, "name", "") or f"Entity {uuid_str[:8]}",
+                    "summary": getattr(node, "summary", "") or "",
+                }
+
+        required: set[str] = set()
+        if edge_results:
+            for edge in edge_results:
+                for attr in ("source_node_uuid", "target_node_uuid"):
+                    value = getattr(edge, attr, None)
+                    if value is None:
+                        continue
+                    value_str = str(value)
+                    if value_str not in lookup:
+                        required.add(value_str)
+
+        if required and self.graphiti is not None:
+            try:
+                fetched_nodes = await EntityNode.get_by_uuids(self.graphiti.driver, list(required))
+                for node in fetched_nodes:
+                    node_uuid = getattr(node, "uuid", None)
+                    if not node_uuid:
+                        continue
+                    uuid_str = str(node_uuid)
+                    lookup.setdefault(
+                        uuid_str,
+                        {
+                            "uuid": uuid_str,
+                            "name": getattr(node, "name", "") or f"Entity {uuid_str[:8]}",
+                            "summary": getattr(node, "summary", "") or "",
+                        },
+                    )
+            except Exception as exc:  # pragma: no cover - debug aid
+                if self.valves.debug_print:
+                    print(f"Failed to fetch entity summaries for visualization: {exc}")
+
+        return lookup
+
+    def _build_entity_connections(
+        self,
+        edges: list[Any] | None,
+        entity_lookup: dict[str, dict[str, str]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Build adjacency lists so entity previews can highlight nearby facts."""
+        if not edges:
+            return {}
+
+        adjacency: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for edge in edges:
+            src_uuid = getattr(edge, "source_node_uuid", None)
+            tgt_uuid = getattr(edge, "target_node_uuid", None)
+            if not src_uuid or not tgt_uuid:
+                continue
+
+            base_payload = {
+                "relation": getattr(edge, "name", "") or "",
+                "fact": getattr(edge, "fact", "") or "",
+                "valid_at": getattr(edge, "valid_at", None),
+                "invalid_at": getattr(edge, "invalid_at", None),
+            }
+
+            src_str = str(src_uuid)
+            tgt_str = str(tgt_uuid)
+            adjacency[src_str].append(
+                {
+                    **base_payload,
+                    "direction": "out",
+                    "other_uuid": tgt_str,
+                    "other": self._get_entity_display(entity_lookup, tgt_str),
+                }
+            )
+            adjacency[tgt_str].append(
+                {
+                    **base_payload,
+                    "direction": "in",
+                    "other_uuid": src_str,
+                    "other": self._get_entity_display(entity_lookup, src_str),
+                }
+            )
+
+        return {uuid: links for uuid, links in adjacency.items() if links}
+
+    @staticmethod
+    def _get_entity_display(
+        entity_lookup: dict[str, dict[str, str]],
+        uuid_value: Optional[str],
+    ) -> dict[str, str]:
+        if not uuid_value:
+            return {"uuid": "unknown", "name": "Unknown Entity", "summary": ""}
+        uuid_str = str(uuid_value)
+        details = entity_lookup.get(uuid_str)
+        if details:
+            return details
+        return {"uuid": uuid_str, "name": f"Entity {uuid_str[:8]}", "summary": ""}
+
+    @staticmethod
+    def _escape_html_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return html.escape(str(value), quote=False)
+
+    @staticmethod
+    def _format_text_block(value: Any, limit: int | None = None) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text:
+            return ""
+        if limit and limit > 3 and len(text) > limit:
+            text = text[: limit - 3].rstrip() + "..."
+        escaped = html.escape(text, quote=False)
+        return escaped.replace("\n", "<br />")
+
+    @staticmethod
+    def _format_timestamp(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d %H:%M")
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @classmethod
+    def _format_valid_range(cls, valid_from: Any, valid_until: Any) -> str:
+        start = cls._format_timestamp(valid_from)
+        end = cls._format_timestamp(valid_until)
+        if not start and not end:
+            return ""
+        if not start:
+            start = "Unknown"
+        if not end:
+            end = "Present"
+        return f"{start} -> {end}"
+
+    @staticmethod
+    def _wrap_rich_html(
+        inner: str,
+        min_height: int = 320,
+        extra_head: Optional[str] = None,
+        extra_body_script: Optional[str] = None,
+    ) -> str:
+        base_css = """
+:root {
+  color-scheme: light dark;
+  --card-bg-light: #ffffff;
+  --card-bg-dark: #111827;
+  --surface-light: #f3f4f6;
+  --surface-dark: #05070f;
+  --border-light: #e5e7eb;
+  --border-dark: #374151;
+  --text-light: #0f172a;
+  --text-dark: #f3f4f6;
+  --accent-light: #2563eb;
+  --accent-dark: #60a5fa;
+  --muted-light: #6b7280;
+  --muted-dark: #9ca3af;
+  --graph-bg-light: rgba(37, 99, 235, 0.08);
+  --graph-bg-dark: rgba(96, 165, 250, 0.12);
+  --card-bg: var(--card-bg-light);
+  --surface: var(--surface-light);
+  --border: var(--border-light);
+  --text: var(--text-light);
+  --accent: var(--accent-light);
+  --muted: var(--muted-light);
+  --graph-bg: var(--graph-bg-light);
+}
+[data-theme="dark"] {
+  --card-bg: var(--card-bg-dark);
+  --surface: var(--surface-dark);
+  --border: var(--border-dark);
+  --text: var(--text-dark);
+  --accent: var(--accent-dark);
+  --muted: var(--muted-dark);
+  --graph-bg: var(--graph-bg-dark);
+}
+body {
+  margin: 0;
+  padding: 12px;
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--surface);
+  color: var(--text);
+  min-height: __MIN_HEIGHT__px;
+}
+.graphiti-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+.card-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.card-heading .title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+.chip {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.15);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.chip-muted {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.graph-band {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+.node {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--graph-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 120px;
+}
+.node-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.node-title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+.node-summary {
+  font-size: 0.85rem;
+  color: var(--text);
+  opacity: 0.9;
+  margin: 0;
+}
+.edge-visual {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(149, 156, 177, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  min-height: 120px;
+}
+.edge-name {
+  font-weight: 600;
+}
+.edge-fact {
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.edge-range {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.connection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.connection-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(37, 99, 235, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.connection-card[data-direction="in"] {
+  background: rgba(249, 115, 22, 0.1);
+}
+.connection-relation {
+  font-weight: 600;
+}
+.connection-fact {
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.connection-entity {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.empty-state,
+.more-note,
+.legend,
+.legend-item {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 12px;
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 0;
+}
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  background: var(--muted);
+}
+.legend-spotlight {
+  background: var(--accent);
+}
+.legend-context {
+  background: #f97316;
+}
+.graph-canvas {
+  width: 100%;
+  min-height: 360px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.05);
+  position: relative;
+}
+.graph-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.9);
+  color: #f8fafc;
+  padding: 8px 10px;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+  font-size: 0.75rem;
+  max-width: 260px;
+  z-index: 5;
+}
+.graph-tooltip.hidden {
+  display: none;
+}
+.muted {
+  color: var(--muted);
+}
+""".replace("__MIN_HEIGHT__", str(min_height))
+
+        script = """
+(function () {
+  const docEl = document.documentElement;
+  const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+  function detectTheme() {
+    try {
+      const parentDoc = window.parent && window.parent.document;
+      if (parentDoc && parentDoc.documentElement && parentDoc.documentElement.classList.contains('dark')) {
+        return 'dark';
+      }
+    } catch (err) {
+      // ignore cross-origin issues
+    }
+    if (prefersDark && prefersDark.matches) {
+      return 'dark';
+    }
+    return 'light';
+  }
+
+  function applyTheme() {
+    docEl.setAttribute('data-theme', detectTheme());
+  }
+
+  applyTheme();
+  if (prefersDark && prefersDark.addEventListener) {
+    prefersDark.addEventListener('change', applyTheme);
+  }
+
+  function resizeFrame() {
+    const frame = window.frameElement;
+    if (!frame) {
+      return;
+    }
+    frame.style.height = Math.ceil(document.body.scrollHeight + 16) + 'px';
+    frame.style.width = '100%';
+  }
+
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(resizeFrame);
+    ro.observe(document.body);
+  } else {
+    window.setInterval(resizeFrame, 750);
+  }
+
+  window.addEventListener('load', resizeFrame);
+  resizeFrame();
+})();
+"""
+
+        head_parts = [f"<style>{base_css}</style>"]
+        if extra_head:
+            head_parts.append(extra_head)
+
+        body_scripts = [f"<script>{script}</script>"]
+        if extra_body_script:
+            body_scripts.append(f"<script>{extra_body_script}</script>")
+
+        return (
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/>"
+            + "".join(head_parts)
+            + f"</head><body>{inner}{''.join(body_scripts)}</body></html>"
+        )
+
+    def _render_fact_graph_html(
+        self,
+        *,
+        fact_text: str,
+        relation_name: Optional[str],
+        source_entity: dict[str, str],
+        target_entity: dict[str, str],
+        valid_from: Any,
+        valid_until: Any,
+        idx: int,
+        total: int,
+    ) -> str:
+        title_text = relation_name or "Fact"
+        title_html = self._escape_html_text(title_text)
+        position_html = self._escape_html_text(f"Fact {idx}/{total}")
+
+        source_summary = self._format_text_block(source_entity.get("summary", ""), 200)
+        target_summary = self._format_text_block(target_entity.get("summary", ""), 200)
+        fact_html = self._format_text_block(fact_text, 420) or ""
+
+        source_block = (
+            f"<p class=\"node-summary\">{source_summary}</p>"
+            if source_summary
+            else "<p class=\"node-summary muted\">No summary stored.</p>"
+        )
+        target_block = (
+            f"<p class=\"node-summary\">{target_summary}</p>"
+            if target_summary
+            else "<p class=\"node-summary muted\">No summary stored.</p>"
+        )
+        range_text = self._format_valid_range(valid_from, valid_until)
+        range_html = f"<div class=\"edge-range\">{self._escape_html_text(range_text)}</div>" if range_text else ""
+
+        inner = f"""
+<div class="graphiti-card fact-card">
+  <div class="card-heading">
+    <span class="chip">{position_html}</span>
+    <span class="title">{title_html}</span>
+  </div>
+  <div class="graph-band">
+    <div class="node">
+      <div class="node-label">Source</div>
+      <div class="node-title">{self._escape_html_text(source_entity.get('name'))}</div>
+      {source_block}
+    </div>
+    <div class="edge-visual">
+      <div class="edge-name">{title_html}</div>
+      <div class="edge-fact">{fact_html}</div>
+      {range_html}
+    </div>
+    <div class="node">
+      <div class="node-label">Target</div>
+      <div class="node-title">{self._escape_html_text(target_entity.get('name'))}</div>
+      {target_block}
+    </div>
+  </div>
+</div>
+"""
+
+        return self._wrap_rich_html(inner.strip(), min_height=360)
+
+    def _render_entity_graph_html(
+        self,
+        *,
+        entity: dict[str, str],
+        connections: list[dict[str, Any]],
+        idx: int,
+        total: int,
+    ) -> str:
+        title_html = self._escape_html_text(entity.get("name"))
+        summary_html = self._format_text_block(entity.get("summary", ""), 360)
+        summary_block = (
+            f"<p class=\"node-summary\">{summary_html}</p>"
+            if summary_html
+            else "<p class=\"node-summary muted\">No summary stored.</p>"
+        )
+        connection_total = len(connections)
+        connection_label = "0 related facts" if connection_total == 0 else (
+            f"{connection_total} related fact{'s' if connection_total != 1 else ''}"
+        )
+
+        max_cards = 4
+        cards: list[str] = []
+        for conn in connections[:max_cards]:
+            direction = conn.get("direction", "out")
+            arrow = "->" if direction == "out" else "<-"
+            relation_html = self._escape_html_text(conn.get("relation") or "Fact")
+            fact_block = self._format_text_block(conn.get("fact", ""), 260)
+            other = conn.get("other") or {}
+            other_name = self._escape_html_text(other.get("name", "Unknown Entity"))
+            other_summary = self._format_text_block(other.get("summary", ""), 180)
+            other_summary_block = (
+                f"<p class=\"node-summary\">{other_summary}</p>"
+                if other_summary
+                else ""
+            )
+            range_text = self._format_valid_range(conn.get("valid_at"), conn.get("invalid_at"))
+            range_html = f"<div class=\"edge-range\">{self._escape_html_text(range_text)}</div>" if range_text else ""
+            fact_section = f"<div class=\"connection-fact\">{fact_block}</div>" if fact_block else ""
+
+            cards.append(
+                f"""
+<div class="connection-card" data-direction="{direction}">
+  <div class="connection-relation">{arrow} {relation_html}</div>
+  <div class="connection-entity">{other_name}</div>
+  {fact_section}
+  {range_html}
+  {other_summary_block}
+</div>
+"""
+            )
+
+        if cards:
+            connections_html = "<div class=\"connection-grid\">" + "".join(cards) + "</div>"
+            if connection_total > max_cards:
+                remaining = connection_total - max_cards
+                more_label = f"+{remaining} more connection{'s' if remaining != 1 else ''} in Graphiti"
+                connections_html += f"<div class=\"more-note\">{self._escape_html_text(more_label)}</div>"
+        else:
+            connections_html = "<div class=\"empty-state\">No related facts were returned for this entity in the current search window.</div>"
+
+        inner = f"""
+<div class="graphiti-card entity-card">
+  <div class="card-heading">
+    <span class="chip">Entity {idx}/{total}</span>
+    <span class="title">{title_html}</span>
+    <span class="chip chip-muted">{self._escape_html_text(connection_label)}</span>
+  </div>
+  <div class="node">
+    <div class="node-label">Summary</div>
+    <div class="node-title">{title_html}</div>
+    {summary_block}
+  </div>
+  {connections_html}
+</div>
+"""
+
+        height = 360 if connection_total == 0 else 420
+        return self._wrap_rich_html(inner.strip(), min_height=height)
+
+    def _build_overview_graph_data(
+        self,
+        entity_lookup: dict[str, dict[str, str]],
+        nodes: list[Any] | None,
+        edges: list[Any] | None,
+        max_nodes: int = 14,
+        max_edges: int = 24,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not entity_lookup:
+            return [], []
+
+        edge_count = len(edges or [])
+        dynamic_node_cap = 30 if edge_count <= 12 else max_nodes
+        dynamic_edge_cap = 60 if edge_count <= 12 else max_edges
+
+        selected: dict[str, dict[str, Any]] = {}
+
+        def add_node(node_uuid: Any, kind: str) -> None:
+            if not node_uuid or len(selected) >= dynamic_node_cap:
+                return
+            uuid_str = str(node_uuid)
+            if uuid_str in selected:
+                return
+            details = self._get_entity_display(entity_lookup, uuid_str)
+            selected[uuid_str] = {
+                "id": uuid_str,
+                "label": details.get("name", f"Entity {uuid_str[:8]}") or f"Entity {uuid_str[:8]}",
+                "summary": details.get("summary", "") or "",
+                "kind": kind,
+            }
+
+        if nodes:
+            for node in nodes:
+                add_node(getattr(node, "uuid", None), "spotlight")
+                if len(selected) >= dynamic_node_cap:
+                    break
+
+        if edges:
+            for edge in edges:
+                add_node(getattr(edge, "source_node_uuid", None), "context")
+                add_node(getattr(edge, "target_node_uuid", None), "context")
+
+        if not selected:
+            return [], []
+
+        node_ids = set(selected.keys())
+        links: list[dict[str, Any]] = []
+        if edges:
+            for edge in edges:
+                if len(links) >= dynamic_edge_cap:
+                    break
+                src = getattr(edge, "source_node_uuid", None)
+                tgt = getattr(edge, "target_node_uuid", None)
+                if not src or not tgt:
+                    continue
+                src_id = str(src)
+                tgt_id = str(tgt)
+                if src_id not in node_ids or tgt_id not in node_ids:
+                    continue
+                links.append(
+                    {
+                        "source": src_id,
+                        "target": tgt_id,
+                        "relation": getattr(edge, "name", "") or "",
+                        "fact": getattr(edge, "fact", "") or "",
+                    }
+                )
+
+        connected_ids: set[str] = set()
+        for link in links:
+            connected_ids.add(str(link["source"]))
+            connected_ids.add(str(link["target"]))
+
+        nodes_payload = [
+            node
+            for node in selected.values()
+            if node["id"] in connected_ids or node["kind"] == "spotlight"
+        ]
+
+        if not links and nodes_payload:
+            # Keep at most 8 spotlight-only nodes to prevent excessive spread when no edges
+            nodes_payload = nodes_payload[:8]
+
+        return nodes_payload, links
+
+    def _render_overview_graph_html(
+        self,
+        nodes_payload: list[dict[str, Any]],
+        links_payload: list[dict[str, Any]],
+    ) -> str:
+        if not nodes_payload:
+            return self._wrap_rich_html(
+                "<div class=\"graphiti-card\"><div class=\"empty-state\">No graph overview available.</div></div>",
+                min_height=280,
+            )
+
+        node_count = len(nodes_payload)
+        edge_count = len(links_payload)
+        chip_text = f"{node_count} entit{'ies' if node_count != 1 else 'y'} · {edge_count} fact{'s' if edge_count != 1 else ''}"
+        legend_html = """
+<div class="legend">
+  <span class="legend-item"><span class="legend-dot legend-spotlight"></span> Spotlight Entities</span>
+  <span class="legend-item"><span class="legend-dot legend-context"></span> Connected Entities</span>
+</div>
+"""
+
+        inner = f"""
+<div class="graphiti-card overview-card">
+  <div class="card-heading">
+    <span class="chip">Overview</span>
+    <span class="title">Retrieved Memory Graph</span>
+    <span class="chip chip-muted">{self._escape_html_text(chip_text)}</span>
+  </div>
+  {legend_html}
+  <div id="graph-container" class="graph-canvas" style="height: 350px;">
+    <svg id="graph-svg" role="img" aria-label="Graph overview"></svg>
+    <div id="graph-tooltip" class="graph-tooltip hidden"></div>
+  </div>
+  <div class="more-note">Interactive snapshot of the entities and facts returned in this search.</div>
+</div>
+"""
+
+        extra_head = "<script src=\"https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js\"></script>"
+        data_json = json.dumps({"nodes": nodes_payload, "links": links_payload})
+        body_script = (
+            "const overviewData = "
+            + data_json
+            + ";\n"
+            + """
+const container = document.getElementById('graph-container');
+const svg = d3.select('#graph-svg');
+const tooltip = document.getElementById('graph-tooltip');
+let rootGroup;
+let zoomBehaviorGlobal;
+let hasInitialFit = false;
+
+const nodesData = overviewData.nodes.map((node) => ({ ...node }));
+const linksData = overviewData.links.map((link) => ({ ...link }));
+
+// Group links by source-target pair for curve calculation
+const linkGroups = {};
+linksData.forEach((link) => {
+  const key = link.source < link.target
+    ? `${link.source}-${link.target}`
+    : `${link.target}-${link.source}`;
+  if (!linkGroups[key]) {
+    linkGroups[key] = [];
+  }
+  linkGroups[key].push(link);
+});
+
+// Assign curve strength to each link
+Object.values(linkGroups).forEach((group) => {
+  const count = group.length;
+  if (count === 1) {
+    group[0].curveStrength = 0;
+  } else {
+    const baseStrength = 0.3;
+    group.forEach((link, i) => {
+      link.curveStrength = -baseStrength + (i * 2 * baseStrength) / (count - 1);
+    });
+  }
+});
+
+// Theme colors
+const theme = {
+  node: {
+    stroke: 'var(--border)',
+    text: 'var(--text)',
+    selected: '#3b82f6',
+    hover: '#60a5fa',
+  },
+  link: {
+    stroke: 'var(--border)',
+    selected: '#3b82f6',
+    label: {
+      bg: 'var(--surface)',
+      text: 'var(--text)',
+    },
+  },
+};
+
+function nodeRadius(d) {
+  return d.kind === 'spotlight' ? 12 : 10;
+}
+
+function colorFor(d) {
+  return d.kind === 'spotlight' ? 'var(--accent)' : '#f97316';
+}
+
+function moveTooltip(event) {
+  const bounds = container.getBoundingClientRect();
+  tooltip.style.left = `${event.clientX - bounds.left + 12}px`;
+  tooltip.style.top = `${event.clientY - bounds.top + 12}px`;
+}
+
+function showTooltip(event, datum) {
+  tooltip.innerHTML = '';
+  const title = document.createElement('div');
+  title.style.fontWeight = '600';
+  title.textContent = datum.label || datum.relation || '';
+  tooltip.appendChild(title);
+  if (datum.summary) {
+    const summary = document.createElement('div');
+    summary.style.marginTop = '4px';
+    summary.textContent = datum.summary;
+    tooltip.appendChild(summary);
+  }
+  if (datum.fact) {
+    const fact = document.createElement('div');
+    fact.style.marginTop = '4px';
+    fact.style.fontStyle = 'italic';
+    fact.textContent = datum.fact;
+    tooltip.appendChild(fact);
+  }
+  tooltip.classList.remove('hidden');
+  moveTooltip(event);
+}
+
+function hideTooltip() {
+  tooltip.classList.add('hidden');
+}
+
+function fitToView(zoomBehavior, width, height) {
+  if (!nodesData.length) {
+    return;
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  nodesData.forEach((node) => {
+    if (typeof node.x === 'number' && typeof node.y === 'number') {
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x);
+      maxY = Math.max(maxY, node.y);
+    }
+  });
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+    return;
+  }
+  const padding = 100;
+  const dx = Math.max(maxX - minX, 10) + padding;
+  const dy = Math.max(maxY - minY, 10) + padding;
+  const scale = Math.min(1.2, 0.8 * Math.min(width / dx, height / dy));
+  const translateX = width / 2 - scale * ((minX + maxX) / 2);
+  const translateY = height / 2 - scale * ((minY + maxY) / 2);
+  svg.transition().duration(750).ease(d3.easeCubicInOut).call(
+    zoomBehavior.transform,
+    d3.zoomIdentity.translate(translateX, translateY).scale(scale),
+  );
+}
+
+function resetAllStyles(linkSelection, nodeSelection) {
+  linkSelection.selectAll('path')
+    .attr('stroke', theme.link.stroke)
+    .attr('stroke-opacity', 0.6)
+    .attr('stroke-width', 1);
+  linkSelection.selectAll('.link-label rect')
+    .attr('fill', theme.link.label.bg);
+  linkSelection.selectAll('.link-label text')
+    .attr('fill', theme.link.label.text);
+  nodeSelection.selectAll('circle')
+    .attr('fill', (d) => colorFor(d))
+    .attr('stroke', theme.node.stroke)
+    .attr('stroke-width', 2);
+}
+
+function renderGraph() {
+  const rect = container.getBoundingClientRect();
+  const width = Math.max(rect.width, 320);
+  const height = Math.max(rect.height, 360);
+  svg.attr('viewBox', `0 0 ${width} ${height}`);
+  svg.attr('width', width);
+  svg.attr('height', height);
+  svg.selectAll('*').remove();
+
+  rootGroup = svg.append('g').attr('class', 'graph-root');
+  const linkLayer = rootGroup.append('g').attr('class', 'graph-links');
+  const nodeLayer = rootGroup.append('g').attr('class', 'graph-nodes');
+
+  // Create link groups (one per link)
+  const linkGroup = linkLayer.selectAll('g')
+    .data(linksData)
+    .enter()
+    .append('g')
+    .attr('class', 'link-group');
+
+  // Add curved paths for links
+  linkGroup.append('path')
+    .attr('stroke', theme.link.stroke)
+    .attr('stroke-opacity', 0.6)
+    .attr('stroke-width', 1)
+    .attr('fill', 'none')
+    .attr('cursor', 'pointer')
+    .attr('data-curve-strength', (d) => d.curveStrength || 0);
+
+  // Add edge labels
+  const labelGroup = linkGroup.append('g')
+    .attr('class', 'link-label')
+    .attr('cursor', 'pointer');
+
+  labelGroup.append('rect')
+    .attr('fill', theme.link.label.bg)
+    .attr('rx', 4)
+    .attr('ry', 4)
+    .attr('opacity', 0.9);
+
+  labelGroup.append('text')
+    .attr('fill', theme.link.label.text)
+    .attr('font-size', '9px')
+    .attr('text-anchor', 'middle')
+    .attr('dominant-baseline', 'middle')
+    .attr('pointer-events', 'none')
+    .text((d) => d.relation || '');
+
+  // Edge click handler
+  function handleEdgeClick(event, d) {
+    event.stopPropagation();
+    resetAllStyles(linkGroup, node);
+
+    // Highlight clicked edge
+    const clickedGroup = d3.select(event.currentTarget.closest('.link-group'));
+    clickedGroup.select('path')
+      .attr('stroke', theme.link.selected)
+      .attr('stroke-opacity', 1)
+      .attr('stroke-width', 2);
+    clickedGroup.select('.link-label rect')
+      .attr('fill', theme.link.selected);
+    clickedGroup.select('.link-label text')
+      .attr('fill', '#ffffff');
+
+    // Highlight connected nodes
+    const sourceId = typeof d.source === 'object' ? d.source.id : d.source;
+    const targetId = typeof d.target === 'object' ? d.target.id : d.target;
+    node.selectAll('circle')
+      .filter((n) => n.id === sourceId || n.id === targetId)
+      .attr('fill', theme.node.selected)
+      .attr('stroke', theme.node.selected)
+      .attr('stroke-width', 3);
+
+    // Zoom to edge
+    const sourceNode = nodesData.find((n) => n.id === sourceId);
+    const targetNode = nodesData.find((n) => n.id === targetId);
+    if (sourceNode && targetNode && zoomBehaviorGlobal) {
+      const padding = 100;
+      const minX = Math.min(sourceNode.x, targetNode.x) - padding;
+      const minY = Math.min(sourceNode.y, targetNode.y) - padding;
+      const maxX = Math.max(sourceNode.x, targetNode.x) + padding;
+      const maxY = Math.max(sourceNode.y, targetNode.y) + padding;
+      const boundWidth = maxX - minX;
+      const boundHeight = maxY - minY;
+      const scale = 0.9 * Math.min(width / boundWidth, height / boundHeight);
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      if (isFinite(scale) && isFinite(midX) && isFinite(midY)) {
+        const transform = d3.zoomIdentity
+          .translate(width / 2 - midX * scale, height / 2 - midY * scale)
+          .scale(scale);
+        svg.transition().duration(750).ease(d3.easeCubicInOut)
+          .call(zoomBehaviorGlobal.transform, transform);
+      }
+    }
+  }
+
+  linkGroup.selectAll('path').on('click', handleEdgeClick);
+  linkGroup.selectAll('.link-label').on('click', handleEdgeClick);
+
+  // Edge hover
+  linkGroup.on('mouseenter', (event, d) => showTooltip(event, d))
+    .on('mousemove', (event) => moveTooltip(event))
+    .on('mouseleave', () => hideTooltip());
+
+  const node = nodeLayer.selectAll('g')
+    .data(nodesData)
+    .enter()
+    .append('g')
+    .attr('cursor', 'pointer')
+    .call(d3.drag()
+      .on('start', dragStarted)
+      .on('drag', dragged)
+      .on('end', dragEnded)
+    );
+
+  node.append('circle')
+    .attr('r', (d) => nodeRadius(d))
+    .attr('fill', (d) => colorFor(d))
+    .attr('fill-opacity', 0.9)
+    .attr('stroke', theme.node.stroke)
+    .attr('stroke-width', 2)
+    .attr('filter', 'drop-shadow(0 2px 4px rgba(0,0,0,0.2))');
+
+  node.append('text')
+    .text((d) => d.label)
+    .attr('x', 15)
+    .attr('y', '0.3em')
+    .attr('text-anchor', 'start')
+    .attr('fill', theme.node.text)
+    .attr('font-weight', '500')
+    .style('font-size', '0.7rem');
+
+  // Node click handler
+  function handleNodeClick(event, d) {
+    event.stopPropagation();
+    resetAllStyles(linkGroup, node);
+
+    // Highlight selected node
+    d3.select(event.currentTarget).select('circle')
+      .attr('fill', theme.node.selected)
+      .attr('stroke', theme.node.selected)
+      .attr('stroke-width', 3);
+
+    // Highlight connected edges
+    const connectedNodes = new Set([d.id]);
+    linkGroup.each(function(linkData) {
+      const sourceId = typeof linkData.source === 'object' ? linkData.source.id : linkData.source;
+      const targetId = typeof linkData.target === 'object' ? linkData.target.id : linkData.target;
+      if (sourceId === d.id || targetId === d.id) {
+        connectedNodes.add(sourceId);
+        connectedNodes.add(targetId);
+        d3.select(this).select('path')
+          .attr('stroke', '#ffffff')
+          .attr('stroke-width', 2);
+      }
+    });
+
+    // Zoom to connected nodes
+    if (connectedNodes.size > 0 && zoomBehaviorGlobal) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      connectedNodes.forEach((nodeId) => {
+        const n = nodesData.find((nd) => nd.id === nodeId);
+        if (n && n.x !== undefined && n.y !== undefined) {
+          minX = Math.min(minX, n.x);
+          minY = Math.min(minY, n.y);
+          maxX = Math.max(maxX, n.x);
+          maxY = Math.max(maxY, n.y);
+        }
+      });
+      const padding = 50;
+      minX -= padding;
+      minY -= padding;
+      maxX += padding;
+      maxY += padding;
+      const boundWidth = maxX - minX;
+      const boundHeight = maxY - minY;
+      const scale = 0.9 * Math.min(width / boundWidth, height / boundHeight);
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      if (isFinite(scale) && isFinite(midX) && isFinite(midY)) {
+        const transform = d3.zoomIdentity
+          .translate(width / 2 - midX * scale, height / 2 - midY * scale)
+          .scale(scale);
+        svg.transition().duration(750).ease(d3.easeCubicInOut)
+          .call(zoomBehaviorGlobal.transform, transform);
+      }
+    }
+  }
+
+  node.on('click', handleNodeClick);
+
+  node.on('mouseenter', (event, d) => showTooltip(event, d))
+    .on('mousemove', (event) => moveTooltip(event))
+    .on('mouseleave', () => hideTooltip());
+
+  // Background click to reset
+  svg.on('click', function(event) {
+    if (event.target === this) {
+      resetAllStyles(linkGroup, node);
+    }
+  });
+
+  const zoomBehavior = d3.zoom()
+    .scaleExtent([0.1, 4])
+    .on('zoom', (event) => {
+      rootGroup.attr('transform', event.transform);
+    });
+
+  zoomBehaviorGlobal = zoomBehavior;
+  svg.call(zoomBehavior);
+  svg.call(zoomBehavior.transform, d3.zoomIdentity.scale(0.8));
+
+  // Identify isolated nodes (not connected by any edge)
+  const linkedNodeIds = new Set();
+  linksData.forEach((link) => {
+    linkedNodeIds.add(link.source);
+    linkedNodeIds.add(link.target);
+  });
+  const isolatedNodeIds = new Set();
+  nodesData.forEach((node) => {
+    if (!linkedNodeIds.has(node.id)) {
+      isolatedNodeIds.add(node.id);
+    }
+  });
+
+  const simulation = d3.forceSimulation(nodesData)
+    .force('link', d3.forceLink(linksData).id((d) => d.id).distance(200).strength(0.2))
+    .force('charge', d3.forceManyBody()
+      .strength((d) => isolatedNodeIds.has(d.id) ? -500 : -3000)
+      .distanceMin(20)
+      .distanceMax(500))
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.05))
+    .force('collision', d3.forceCollide().radius((d) => nodeRadius(d) + 50).strength(0.3))
+    .force('isolatedGravity', d3.forceRadial(100, width / 2, height / 2)
+      .strength((d) => isolatedNodeIds.has(d.id) ? 0.15 : 0.01))
+    .velocityDecay(0.4)
+    .alphaDecay(0.05);
+
+  simulation.on('tick', () => {
+    // Update curved paths
+    linkGroup.each(function(d) {
+      const group = d3.select(this);
+      const path = group.select('path');
+      const curveStrength = d.curveStrength || 0;
+
+      const sourceX = typeof d.source === 'object' ? d.source.x : nodesData.find((n) => n.id === d.source).x;
+      const sourceY = typeof d.source === 'object' ? d.source.y : nodesData.find((n) => n.id === d.source).y;
+      const targetX = typeof d.target === 'object' ? d.target.x : nodesData.find((n) => n.id === d.target).x;
+      const targetY = typeof d.target === 'object' ? d.target.y : nodesData.find((n) => n.id === d.target).y;
+
+      // Self-referencing edge
+      if (d.source === d.target || (d.source.id && d.source.id === d.target.id)) {
+        const radiusX = 40;
+        const radiusY = 90;
+        const cx = sourceX;
+        const cy = sourceY - radiusY - 20;
+        const pathD = `M${sourceX},${sourceY} C${cx - radiusX},${cy} ${cx + radiusX},${cy} ${sourceX},${sourceY}`;
+        path.attr('d', pathD);
+
+        // Position label for self-loop
+        const labelG = group.select('.link-label');
+        const text = labelG.select('text');
+        const rect = labelG.select('rect');
+        labelG.attr('transform', `translate(${cx}, ${cy - 10})`);
+        const textBBox = text.node().getBBox();
+        rect.attr('x', -textBBox.width / 2 - 6)
+          .attr('y', -textBBox.height / 2 - 4)
+          .attr('width', textBBox.width + 12)
+          .attr('height', textBBox.height + 8);
+        text.attr('x', 0).attr('y', 0);
+      } else {
+        const dx = targetX - sourceX;
+        const dy = targetY - sourceY;
+        const dr = Math.sqrt(dx * dx + dy * dy);
+        const midX = (sourceX + targetX) / 2;
+        const midY = (sourceY + targetY) / 2;
+        const normalX = -dy / dr;
+        const normalY = dx / dr;
+        const curveMagnitude = dr * curveStrength;
+        const controlX = midX + normalX * curveMagnitude;
+        const controlY = midY + normalY * curveMagnitude;
+        const pathD = `M${sourceX},${sourceY} Q${controlX},${controlY} ${targetX},${targetY}`;
+        path.attr('d', pathD);
+
+        // Position label at midpoint of curve
+        const pathNode = path.node();
+        if (pathNode) {
+          const pathLength = pathNode.getTotalLength();
+          const midPoint = pathNode.getPointAtLength(pathLength / 2);
+          const labelG = group.select('.link-label');
+          const text = labelG.select('text');
+          const rect = labelG.select('rect');
+          const textBBox = text.node().getBBox();
+
+          const angle = (Math.atan2(targetY - sourceY, targetX - sourceX) * 180) / Math.PI;
+          const rotationAngle = angle > 90 || angle < -90 ? angle - 180 : angle;
+
+          labelG.attr('transform', `translate(${midPoint.x}, ${midPoint.y}) rotate(${rotationAngle})`);
+          rect.attr('x', -textBBox.width / 2 - 6)
+            .attr('y', -textBBox.height / 2 - 4)
+            .attr('width', textBBox.width + 12)
+            .attr('height', textBBox.height + 8);
+          text.attr('x', 0).attr('y', 0);
+        }
+      }
+    });
+
+    node.attr('transform', (d) => `translate(${d.x}, ${d.y})`);
+  });
+
+  simulation.on('end', () => {
+    if (!hasInitialFit) {
+      hasInitialFit = true;
+      fitToView(zoomBehavior, width, height);
+    }
+  });
+  setTimeout(() => {
+    if (!hasInitialFit) {
+      hasInitialFit = true;
+      fitToView(zoomBehavior, width, height);
+    }
+  }, 900);
+
+  function dragStarted(event) {
+    if (!event.active) {
+      simulation.velocityDecay(0.7).alphaDecay(0.1).alphaTarget(0.1).restart();
+    }
+    d3.select(event.sourceEvent.target.parentNode).select('circle')
+      .attr('stroke', theme.node.hover)
+      .attr('stroke-width', 3);
+    event.subject.fx = event.subject.x;
+    event.subject.fy = event.subject.y;
+  }
+
+  function dragged(event) {
+    event.subject.x = event.x;
+    event.subject.y = event.y;
+    event.subject.fx = event.x;
+    event.subject.fy = event.y;
+  }
+
+  function dragEnded(event) {
+    if (!event.active) {
+      simulation.velocityDecay(0.4).alphaDecay(0.05).alphaTarget(0);
+    }
+    d3.select(event.sourceEvent.target.parentNode).select('circle')
+      .attr('stroke', theme.node.stroke)
+      .attr('stroke-width', 2);
+    // Keep node fixed at final position
+    event.subject.fx = event.x;
+    event.subject.fy = event.y;
+  }
+}
+
+renderGraph();
+window.addEventListener('resize', renderGraph, { passive: true });
+"""
+        )
+
+        return self._wrap_rich_html(inner.strip(), min_height=350, extra_head=extra_head, extra_body_script=body_script)
+    
+    def _build_overview_citation_event(
+        self,
+        entity_lookup: dict[str, dict[str, str]],
+        nodes: list[Any] | None,
+        edges: list[Any] | None,
+    ) -> Optional[dict]:
+        nodes_payload, links_payload = self._build_overview_graph_data(
+            entity_lookup,
+            nodes,
+            edges,
+        )
+        if not nodes_payload:
+            return None
+
+        overview_html = self._render_overview_graph_html(nodes_payload, links_payload)
+        source_id = self.valves.citation_source_id or "graphiti-memory"
+        source_name = self.valves.citation_source_name or "Graphiti Memory"
+        metadata: dict[str, Any] = {
+            "source": source_id,
+            "html": overview_html,
+        }
+
+        return {
+            "source": {
+                "id": source_id,
+                "name": source_name,
+                "type": "graphiti_memory",
+            },
+            "document": [overview_html],
+            "metadata": [metadata],
+        }
     
     @staticmethod
     def _parse_allowed_source_types(value: Any) -> Optional[set[str]]:
@@ -1194,6 +2469,23 @@ class Filter:
 
         facts = []
         entities = {}  # Dictionary to store unique entities: {name: summary}
+
+        entity_lookup = await self._build_entity_lookup(results.nodes, results.edges)
+        entity_connections = self._build_entity_connections(results.edges, entity_lookup)
+
+        if user_valves.show_citation:
+            overview_citation = self._build_overview_citation_event(
+                entity_lookup=entity_lookup,
+                nodes=results.nodes,
+                edges=results.edges,
+            )
+            if overview_citation:
+                await __event_emitter__(
+                    {
+                        "type": "citation",
+                        "data": overview_citation,
+                    }
+                )
         
         # Process EntityEdge results (relations/facts) only if enabled
         if user_valves.inject_facts:
@@ -1214,6 +2506,7 @@ class Filter:
                         result,
                         idx,
                         len(results.edges),
+                        entity_lookup,
                     )
                     if fact_citation:
                         await __event_emitter__(
@@ -1246,6 +2539,8 @@ class Filter:
                             result,
                             idx,
                             len(results.nodes),
+                            entity_lookup,
+                            entity_connections,
                         )
                         if entity_citation:
                             await __event_emitter__(
@@ -1261,7 +2556,6 @@ class Filter:
             if self.valves.debug_print:
                 print(f'Skipping {len(results.nodes)} entities (inject_entities is disabled)')
 
-            
         # Insert memory message if we have facts OR entities
         if len(facts) > 0 or len(entities) > 0:
             # Find the index of the last user message
