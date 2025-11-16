@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.9.0
+version: 0.9.1
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -348,6 +348,10 @@ class Filter:
         show_citation: bool = Field(
             default=True,
             description="Emit retrieval results as citation events (affects fact/entity previews).",
+        )
+        rich_html_citations: bool = Field(
+            default=True,
+            description="Render citation results as rich HTML with interactive graph visualizations. When disabled, uses plain text format.",
         )
         save_user_message: bool = Field(
             default=True,
@@ -861,6 +865,7 @@ class Filter:
         idx: int,
         total: int,
         entity_lookup: dict[str, dict[str, str]],
+        use_rich_html: bool = True,
     ) -> Optional[dict]:
         """Convert a Graphiti fact result into a citation payload for Open WebUI."""
         fact_text = getattr(result, "fact", None)
@@ -889,17 +894,22 @@ class Filter:
         if parameters:
             metadata["parameters"] = parameters
 
-        graph_html = self._render_fact_graph_html(
-            fact_text=fact_text,
-            relation_name=getattr(result, "name", None),
-            source_entity=self._get_entity_display(entity_lookup, getattr(result, "source_node_uuid", None)),
-            target_entity=self._get_entity_display(entity_lookup, getattr(result, "target_node_uuid", None)),
-            valid_from=valid_from,
-            valid_until=valid_until,
-            idx=idx,
-            total=total,
-        )
-        metadata["html"] = graph_html
+        if use_rich_html:
+            graph_html = self._render_fact_graph_html(
+                fact_text=fact_text,
+                relation_name=getattr(result, "name", None),
+                source_entity=self._get_entity_display(entity_lookup, getattr(result, "source_node_uuid", None)),
+                target_entity=self._get_entity_display(entity_lookup, getattr(result, "target_node_uuid", None)),
+                valid_from=valid_from,
+                valid_until=valid_until,
+                idx=idx,
+                total=total,
+            )
+            metadata["html"] = graph_html
+            document_content = graph_html
+        else:
+            emoji = "🔚" if valid_until else "🔛"
+            document_content = f"{emoji} Fact {idx}/{total}: {fact_text}"
 
         return {
             "source": {
@@ -907,7 +917,7 @@ class Filter:
                 "name": source_name,
                 "type": "graphiti_memory",
             },
-            "document": [graph_html],
+            "document": [document_content],
             "metadata": [metadata],
         }
 
@@ -918,6 +928,7 @@ class Filter:
         total: int,
         entity_lookup: dict[str, dict[str, str]],
         entity_connections: dict[str, list[dict[str, Any]]],
+        use_rich_html: bool = True,
     ) -> Optional[dict]:
         """Convert a Graphiti entity result into a citation payload for Open WebUI."""
         name = getattr(result, "name", None)
@@ -937,22 +948,26 @@ class Filter:
         if parameters:
             metadata["parameters"] = parameters
 
-        entity_uuid = getattr(result, "uuid", None)
-        entity_details = self._get_entity_display(entity_lookup, entity_uuid)
-        if not entity_details.get("summary"):
-            entity_details = {
-                **entity_details,
-                "summary": summary,
-            }
-        connections = entity_connections.get(str(entity_uuid) if entity_uuid else "", [])
+        if use_rich_html:
+            entity_uuid = getattr(result, "uuid", None)
+            entity_details = self._get_entity_display(entity_lookup, entity_uuid)
+            if not entity_details.get("summary"):
+                entity_details = {
+                    **entity_details,
+                    "summary": summary,
+                }
+            connections = entity_connections.get(str(entity_uuid) if entity_uuid else "", [])
 
-        graph_html = self._render_entity_graph_html(
-            entity=entity_details,
-            connections=connections,
-            idx=idx,
-            total=total,
-        )
-        metadata["html"] = graph_html
+            graph_html = self._render_entity_graph_html(
+                entity=entity_details,
+                connections=connections,
+                idx=idx,
+                total=total,
+            )
+            metadata["html"] = graph_html
+            document_content = graph_html
+        else:
+            document_content = f"👤 Entity {idx}/{total}: {name} - {summary}"
 
         return {
             "source": {
@@ -960,7 +975,7 @@ class Filter:
                 "name": self.valves.citation_source_name or "Graphiti Memory",
                 "type": "graphiti_memory",
             },
-            "document": [graph_html],
+            "document": [document_content],
             "metadata": [metadata],
         }
 
@@ -2507,6 +2522,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         idx,
                         len(results.edges),
                         entity_lookup,
+                        use_rich_html=user_valves.rich_html_citations,
                     )
                     if fact_citation:
                         await __event_emitter__(
@@ -2541,6 +2557,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             len(results.nodes),
                             entity_lookup,
                             entity_connections,
+                            use_rich_html=user_valves.rich_html_citations,
                         )
                         if entity_citation:
                             await __event_emitter__(
