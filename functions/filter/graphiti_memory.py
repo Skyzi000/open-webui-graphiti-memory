@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.10.1
+version: 0.10.2
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -1527,9 +1527,15 @@ body {
         idx: int,
         total: int,
     ) -> str:
-        title_text = relation_name or "Fact"
-        title_html = self._escape_html_text(title_text)
+        relation_text = relation_name or "Fact"
+        relation_html = self._escape_html_text(relation_text)
         position_html = self._escape_html_text(f"Fact {idx}/{total}")
+
+        # Build title: SOURCE → RELATION → TARGET
+        source_name = source_entity.get("name", "Unknown")
+        target_name = target_entity.get("name", "Unknown")
+        title_text = f"{source_name} → {relation_text} → {target_name}"
+        title_html = self._escape_html_text(title_text)
 
         source_summary = self._format_text_block(source_entity.get("summary", ""), 200)
         target_summary = self._format_text_block(target_entity.get("summary", ""), 200)
@@ -1561,7 +1567,7 @@ body {
       {source_block}
     </div>
     <div class="edge-visual">
-      <div class="edge-name">{title_html}</div>
+      <div class="edge-name">{relation_html}</div>
       <div class="edge-fact">{fact_html}</div>
       {range_html}
     </div>
