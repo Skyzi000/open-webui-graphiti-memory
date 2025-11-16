@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.10.2
+version: 0.10.3
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -753,7 +753,7 @@ class Filter:
             max_chars: Character budget used to stop collecting additional turns (<=0 disables).
         
         Returns:
-            String formatted as alternating "User | ..." / "Assistant | ..." blocks, or None if no user turn found.
+            String formatted as alternating "User：..." / "Assistant：..." blocks, or None if no user turn found.
         """
         if not messages:
             return None
@@ -788,7 +788,7 @@ class Filter:
                 continue
             
             role_label = "User" if role == "user" else "Assistant"
-            segment = f"{role_label} | {text}"
+            segment = f"{role_label}：{text}"
             
             addition = len(segment) if not collected else len(separator) + len(segment)
             collected.append(segment)
@@ -2377,7 +2377,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # : - field separator  
         # " - quote operator
         # Keep: !, ?, ., ,, and other common punctuation
-        sanitized = re.sub(r'[@:"()]', ' ', query)
+        sanitized = re.sub(r'[@:"()|]', ' ', query)
         
         # Replace multiple spaces with single space
         sanitized = re.sub(r'\s+', ' ', sanitized)
