@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.10.3
+version: 0.10.4
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -2195,12 +2195,15 @@ function renderGraph() {
         const text = labelG.select('text');
         const rect = labelG.select('rect');
         labelG.attr('transform', `translate(${cx}, ${cy - 10})`);
-        const textBBox = text.node().getBBox();
-        rect.attr('x', -textBBox.width / 2 - 6)
-          .attr('y', -textBBox.height / 2 - 4)
-          .attr('width', textBBox.width + 12)
-          .attr('height', textBBox.height + 8);
-        text.attr('x', 0).attr('y', 0);
+        const textNode = text.node();
+        if (textNode) {
+          const textBBox = textNode.getBBox();
+          rect.attr('x', -textBBox.width / 2 - 6)
+            .attr('y', -textBBox.height / 2 - 4)
+            .attr('width', textBBox.width + 12)
+            .attr('height', textBBox.height + 8);
+          text.attr('x', 0).attr('y', 0);
+        }
       } else {
         const dx = targetX - sourceX;
         const dy = targetY - sourceY;
@@ -2223,17 +2226,20 @@ function renderGraph() {
           const labelG = group.select('.link-label');
           const text = labelG.select('text');
           const rect = labelG.select('rect');
-          const textBBox = text.node().getBBox();
+          const textNode = text.node();
+          if (textNode) {
+            const textBBox = textNode.getBBox();
 
-          const angle = (Math.atan2(targetY - sourceY, targetX - sourceX) * 180) / Math.PI;
-          const rotationAngle = angle > 90 || angle < -90 ? angle - 180 : angle;
+            const angle = (Math.atan2(targetY - sourceY, targetX - sourceX) * 180) / Math.PI;
+            const rotationAngle = angle > 90 || angle < -90 ? angle - 180 : angle;
 
-          labelG.attr('transform', `translate(${midPoint.x}, ${midPoint.y}) rotate(${rotationAngle})`);
-          rect.attr('x', -textBBox.width / 2 - 6)
-            .attr('y', -textBBox.height / 2 - 4)
-            .attr('width', textBBox.width + 12)
-            .attr('height', textBBox.height + 8);
-          text.attr('x', 0).attr('y', 0);
+            labelG.attr('transform', `translate(${midPoint.x}, ${midPoint.y}) rotate(${rotationAngle})`);
+            rect.attr('x', -textBBox.width / 2 - 6)
+              .attr('y', -textBBox.height / 2 - 4)
+              .attr('width', textBBox.width + 12)
+              .attr('height', textBBox.height + 8);
+            text.attr('x', 0).attr('y', 0);
+          }
         }
       }
     });
