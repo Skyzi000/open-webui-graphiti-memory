@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.2
+version: 0.3
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -51,7 +51,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
 from graphiti_core.driver.falkordb_driver import FalkorDriver
-from graphiti_core.nodes import EntityNode, EpisodicNode, EpisodeType
+from graphiti_core.nodes import EntityNode, EpisodicNode, EpisodeType, get_episodic_node_from_record
 from graphiti_core.edges import EntityEdge
 from openai import AsyncOpenAI
 
@@ -1052,22 +1052,22 @@ class Tools:
     ) -> str:
         """
         Search for episodes (conversation history) without deleting them.
-        
+
         This tool allows you to preview episodes before deciding to delete them.
         Use this to verify what will be deleted before calling search_and_delete_episodes.
-        
+
         :param query: Search query to find episodes (e.g., "conversation about Python")
         :param limit: Maximum number of episodes to return (default: 10, max: 100)
         :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
         :return: List of found episodes with their details
-        
+
         Note: __user__ and __event_emitter__ are automatically injected by the system.
         """
-        
+
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
-        
-        
+
+
         # Set user headers in context variable (before any API calls)
         headers = self._get_user_info_headers(__user__, None)
         if headers:
@@ -1076,61 +1076,201 @@ class Tools:
                 print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
-        
+
         try:
             group_id = self.helper.get_group_id(__user__)
-            
+
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
             search_config.limit = limit
-            
+
             # Search for episodes
             search_results = await self.helper.graphiti.search_(
                 query=query,
                 group_ids=[group_id] if group_id else None,
                 config=search_config,
             )
-            
+
             # Extract episodes
             episodes = search_results.episodes
-            
+
             if not episodes:
                 return f"ℹ️ No episodes found matching '{query}'"
-            
+
             total_count = len(episodes)
-            
+
             # Build result message
             result = f"🔍 Found {total_count} episodes matching '{query}':\n\n"
-            
+
             for i, episode in enumerate(episodes, 1):
                 name = getattr(episode, 'name', 'Unknown episode')
                 content = getattr(episode, 'content', '')
                 created_at = getattr(episode, 'created_at', 'unknown')
                 uuid = getattr(episode, 'uuid', 'N/A')
-                
+
                 # Truncate content for preview
                 if len(content) > 150:
                     content_preview = content[:150] + "..."
                 else:
                     content_preview = content
-                
+
                 result += f"**{i}. {name}**\n"
                 result += f"   Content: {content_preview}\n"
                 result += f"   Created: {created_at}\n"
                 if show_uuid:
                     result += f"   UUID: `{uuid}`\n"
                 result += "\n"
-            
+
             result += f"💡 To delete these episodes, use `search_and_delete_episodes` with the same query and limit."
-            
+
             return result
-            
+
         except Exception as e:
             error_msg = f"❌ Error searching episodes: {str(e)}"
             if self.valves.debug_print:
                 traceback.print_exc()
             return error_msg
-    
+
+    async def get_recent_episodes(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        show_uuid: bool = False,
+        __user__: dict = {},
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Get recent episodes sorted by creation time (newest first).
+
+        This tool retrieves episodes in chronological order without requiring a search query.
+        Useful for viewing your conversation history or recent memories.
+
+        :param limit: Maximum number of episodes to return (default: 10, max: 100)
+        :param offset: Number of episodes to skip for pagination (default: 0)
+        :param show_uuid: Whether to display UUID in results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        :return: List of recent episodes with their details
+
+        Examples:
+        - get_recent_episodes(limit=20) - Get the 20 most recent episodes
+        - get_recent_episodes(limit=10, offset=10) - Get episodes 11-20 (pagination)
+        - get_recent_episodes(limit=5, show_uuid=True) - Get 5 recent episodes with UUIDs
+
+        Note: __user__ and __event_emitter__ are automatically injected by the system.
+        """
+
+        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
+            return "❌ Error: Memory service is not available"
+
+        # Set user headers in context variable (before any API calls)
+        headers = self._get_user_info_headers(__user__, None)
+        if headers:
+            user_headers_context.set(headers)
+            if self.valves.debug_print:
+                print(f"Set user headers in context: {list(headers.keys())}")
+
+        # Validate and clamp parameters
+        limit = max(1, min(100, limit))
+        offset = max(0, offset)
+
+        try:
+            group_id = self.helper.get_group_id(__user__)
+
+            if self.valves.debug_print:
+                print(f"=== get_recent_episodes: Fetching episodes ===")
+                print(f"Group ID: {group_id}")
+                print(f"Limit: {limit}, Offset: {offset}")
+
+            # Use get_by_group_ids with database-level limit
+            # Calculate effective limit to handle offset
+            fetch_limit = offset + limit if offset > 0 else limit
+
+            # Fetch episodes using the existing method
+            if group_id:
+                all_episodes = await EpisodicNode.get_by_group_ids(
+                    self.helper.graphiti.driver,
+                    [group_id],
+                    limit=fetch_limit
+                )
+            else:
+                # Without group_id, fetch without filtering
+                all_episodes = await EpisodicNode.get_by_group_ids(
+                    self.helper.graphiti.driver,
+                    [],
+                    limit=fetch_limit
+                )
+
+            if not all_episodes:
+                return "ℹ️ No episodes found"
+
+            if self.valves.debug_print:
+                print(f"Fetched {len(all_episodes)} episodes from database")
+
+            # Sort by created_at in descending order (newest first)
+            episodes_sorted = sorted(
+                all_episodes,
+                key=lambda ep: getattr(ep, 'created_at', datetime.min),
+                reverse=True
+            )
+
+            # Get total count (this is approximate if fetch_limit is reached)
+            total_count = len(episodes_sorted)
+            has_more_in_db = len(episodes_sorted) >= fetch_limit
+
+            if offset >= total_count:
+                return f"ℹ️ No episodes found at offset {offset} (showing up to {total_count} episodes)"
+
+            # Apply offset
+            episodes = episodes_sorted[offset:offset + limit]
+
+            if not episodes:
+                return f"ℹ️ No episodes found at offset {offset} (showing up to {total_count} episodes)"
+
+            # Build result message
+            result = f"📅 Recent episodes ({len(episodes)}"
+            if has_more_in_db:
+                result += f", showing most recent {total_count}"
+            else:
+                result += f" of {total_count} total"
+            if offset > 0:
+                result += f", starting from #{offset + 1}"
+            result += "):\n\n"
+
+            for i, episode in enumerate(episodes, 1):
+                name = getattr(episode, 'name', 'Unknown episode')
+                content = getattr(episode, 'content', '')
+                created_at = getattr(episode, 'created_at', 'unknown')
+                source = getattr(episode, 'source', 'unknown')
+                uuid = getattr(episode, 'uuid', 'N/A')
+
+                # Truncate content for preview
+                if len(content) > 150:
+                    content_preview = content[:150] + "..."
+                else:
+                    content_preview = content
+
+                # Calculate actual position in full list
+                position = offset + i
+
+                result += f"**{position}. {name}**\n"
+                result += f"   Content: {content_preview}\n"
+                result += f"   Created: {created_at}\n"
+                result += f"   Source: {source}\n"
+                if show_uuid:
+                    result += f"   UUID: `{uuid}`\n"
+                result += "\n"
+
+            # Add pagination hints
+            if offset + limit < total_count or has_more_in_db:
+                result += f"💡 More episodes may be available. Use `offset={offset + limit}` to see the next page."
+
+            return result
+
+        except Exception as e:
+            error_msg = f"❌ Error retrieving recent episodes: {str(e)}"
+            if self.valves.debug_print:
+                traceback.print_exc()
+            return error_msg
+
     async def search_and_delete_entities(
         self,
         query: str,
