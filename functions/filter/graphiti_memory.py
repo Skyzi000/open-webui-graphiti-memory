@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.11.1
+version: 0.12.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -340,6 +340,14 @@ class Filter:
             default=600,
             description="How long (in seconds) to keep pending citation events before auto-cleanup if the outlet never runs.",
         )
+        episode_dedup_time_window: int = Field(
+            default=600,
+            description="Time window (in seconds) to keep episode deduplication history. Episodes within this window will be checked for duplicates. Default is 600 seconds (10 minutes).",
+        )
+        episode_dedup_max_entries: int = Field(
+            default=1000,
+            description="Maximum number of episode deduplication entries to keep in memory. When this limit is reached, oldest entries will be removed. Default is 1000.",
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -396,6 +404,10 @@ class Filter:
             default=1,
             description="How many of the most recent user/assistant messages to include in the Graphiti search query. 1 uses only the latest user message, 2 also appends the assistant reply before it, 3 adds the previous user turn, and so on. Values <= 0 include as many alternating user/assistant messages as possible, still respecting the max_search_message_length limit. Messages from other roles are ignored.",
         )
+        episode_dedup_enabled: bool = Field(
+            default=True,
+            description="Enable duplicate episode detection. When enabled, prevents duplicate episodes (identified by chat_id and episode content hash) from being saved when multiple models respond simultaneously. Automatically allows different assistant responses when save_assistant_response is enabled.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -404,6 +416,9 @@ class Filter:
         self._last_config = None  # Track configuration for change detection
         self._pending_citations: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_citations_lock = asyncio.Lock()
+        # Episode deduplication tracking: {(chat_id, episode_hash): timestamp}
+        self._processed_episodes: dict[tuple[str, str], float] = {}
+        self._episodes_lock = asyncio.Lock()
         # Defer Graphiti initialization until inlet()/outlet() needs it
         if self.valves.debug_print:
             print("Graphiti initialization deferred until first use")
@@ -646,7 +661,32 @@ class Filter:
                 return False
         
         return True
-    
+
+    def _cleanup_old_episodes(self) -> None:
+        """
+        Clean up old processed episode entries based on time window and max entries limit.
+        This method must be called while holding self._episodes_lock.
+        """
+        current_time = time.time()
+        cutoff_time = current_time - self.valves.episode_dedup_time_window
+
+        # Remove entries older than the time window
+        self._processed_episodes = {
+            key: timestamp
+            for key, timestamp in self._processed_episodes.items()
+            if timestamp > cutoff_time
+        }
+
+        # Enforce max entries limit if still too many
+        if len(self._processed_episodes) > self.valves.episode_dedup_max_entries:
+            # Sort by timestamp (oldest first) and keep only the most recent entries
+            sorted_items = sorted(
+                self._processed_episodes.items(),
+                key=lambda x: x[1]
+            )
+            keep_count = self.valves.episode_dedup_max_entries
+            self._processed_episodes = dict(sorted_items[-keep_count:])
+
     def _get_group_id(self, user: dict) -> Optional[str]:
         """
         Generate group_id for the user based on format string configuration.
@@ -2986,10 +3026,42 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Generate group_id using configured method (email or user ID)
         group_id = self._get_group_id(__user__)
         saved_count = 0
-        
+
         # Store add_episode results for detailed status display
         add_results = None
-        
+        episode_key = None
+        episode_dedup_added = False
+
+        # Check for duplicate episodes if enabled
+        if user_valves.episode_dedup_enabled:
+            # Use episode body hash as key to detect duplicates
+            # This allows detection when multiple models respond simultaneously with same content
+            # but won't block when assistant responses differ (e.g., save_assistant_response=True)
+            episode_hash = hashlib.sha256(episode_body.encode()).hexdigest()
+            episode_key = (chat_id, episode_hash)
+
+            async with self._episodes_lock:
+                # Check if this episode has already been processed
+                if episode_key in self._processed_episodes:
+                    if self.valves.debug_print:
+                        print(f"Skipping duplicate episode: chat_id={chat_id}, hash={episode_hash[:16]}...")
+                    # Skip processing for this duplicate episode
+                    if user_valves.show_status:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": f"⏭️ Skipped duplicate episode (already processed)", "done": True},
+                            }
+                        )
+                    return body
+
+                # Mark as processed immediately (before add_episode starts)
+                self._processed_episodes[episode_key] = time.time()
+                episode_dedup_added = True
+
+                # Clean up old entries
+                self._cleanup_old_episodes()
+
         try:
             # Apply timeout if configured
             if self.valves.add_episode_timeout > 0:
@@ -3105,6 +3177,11 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         "data": {"description": f"Warning: {user_msg}", "done": False},
                     }
                 )
+        finally:
+            # If saving failed, remove the dedup marker so retries are allowed
+            if user_valves.episode_dedup_enabled and episode_dedup_added and saved_count == 0 and episode_key:
+                async with self._episodes_lock:
+                    self._processed_episodes.pop(episode_key, None)
         
         # Only increment count for successfully saved messages
         if saved_count > 0:
