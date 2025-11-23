@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3
+version: 0.3.1
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -1140,10 +1140,10 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Get recent episodes sorted by creation time (newest first).
+        Get recent episodes in chronological order (oldest first).
 
-        This tool retrieves episodes in chronological order without requiring a search query.
-        Useful for viewing your conversation history or recent memories.
+        This tool retrieves episodes sorted by time without requiring a search query.
+        Useful for viewing your conversation history or recent memories in the order they occurred.
 
         :param limit: Maximum number of episodes to return (default: 10, max: 100)
         :param offset: Number of episodes to skip for pagination (default: 0)
@@ -1180,57 +1180,34 @@ class Tools:
                 print(f"Group ID: {group_id}")
                 print(f"Limit: {limit}, Offset: {offset}")
 
-            # Use get_by_group_ids with database-level limit
-            # Calculate effective limit to handle offset
-            fetch_limit = offset + limit if offset > 0 else limit
-
-            # Fetch episodes using the existing method
-            if group_id:
-                all_episodes = await EpisodicNode.get_by_group_ids(
-                    self.helper.graphiti.driver,
-                    [group_id],
-                    limit=fetch_limit
-                )
-            else:
-                # Without group_id, fetch without filtering
-                all_episodes = await EpisodicNode.get_by_group_ids(
-                    self.helper.graphiti.driver,
-                    [],
-                    limit=fetch_limit
-                )
-
-            if not all_episodes:
-                return "ℹ️ No episodes found"
-
-            if self.valves.debug_print:
-                print(f"Fetched {len(all_episodes)} episodes from database")
-
-            # Sort by created_at in descending order (newest first)
-            episodes_sorted = sorted(
-                all_episodes,
-                key=lambda ep: getattr(ep, 'created_at', datetime.min),
-                reverse=True
+            # Retrieve episodes via Graphiti helper (chronological order, oldest→newest)
+            # +1 to detect if there are more
+            fetch_count = offset + limit + 1
+            episodes_list = await self.helper.graphiti.retrieve_episodes(
+                reference_time=datetime.now(timezone.utc),
+                last_n=fetch_count,
+                group_ids=[group_id] if group_id else None,
             )
 
-            # Get total count (this is approximate if fetch_limit is reached)
-            total_count = len(episodes_sorted)
-            has_more_in_db = len(episodes_sorted) >= fetch_limit
+            if not episodes_list:
+                return "ℹ️ No episodes found"
 
-            if offset >= total_count:
-                return f"ℹ️ No episodes found at offset {offset} (showing up to {total_count} episodes)"
+            total_fetched = len(episodes_list)
+            has_more_in_db = total_fetched > (offset + limit)
 
-            # Apply offset
-            episodes = episodes_sorted[offset:offset + limit]
+            # episodes_list is in chronological order.
+            # The end side is "newer", so extract offset/limit based on the end.
+            start = max(0, total_fetched - (offset + limit))
+            end = total_fetched - offset
+            episodes = episodes_list[start:end]
 
             if not episodes:
-                return f"ℹ️ No episodes found at offset {offset} (showing up to {total_count} episodes)"
+                return f"ℹ️ No episodes found at offset {offset}"
 
             # Build result message
             result = f"📅 Recent episodes ({len(episodes)}"
             if has_more_in_db:
-                result += f", showing most recent {total_count}"
-            else:
-                result += f" of {total_count} total"
+                result += ", more may be available"
             if offset > 0:
                 result += f", starting from #{offset + 1}"
             result += "):\n\n"
@@ -1238,7 +1215,7 @@ class Tools:
             for i, episode in enumerate(episodes, 1):
                 name = getattr(episode, 'name', 'Unknown episode')
                 content = getattr(episode, 'content', '')
-                created_at = getattr(episode, 'created_at', 'unknown')
+                valid_at = getattr(episode, 'valid_at', 'unknown')
                 source = getattr(episode, 'source', 'unknown')
                 uuid = getattr(episode, 'uuid', 'N/A')
 
@@ -1253,15 +1230,15 @@ class Tools:
 
                 result += f"**{position}. {name}**\n"
                 result += f"   Content: {content_preview}\n"
-                result += f"   Created: {created_at}\n"
+                result += f"   Time: {valid_at}\n"
                 result += f"   Source: {source}\n"
                 if show_uuid:
                     result += f"   UUID: `{uuid}`\n"
                 result += "\n"
 
             # Add pagination hints
-            if offset + limit < total_count or has_more_in_db:
-                result += f"💡 More episodes may be available. Use `offset={offset + limit}` to see the next page."
+            if has_more_in_db:
+                result += f"💡 More episodes may be available. Use `offset={offset + len(episodes)}` to see the next page."
 
             return result
 
@@ -1851,7 +1828,6 @@ class Tools:
             
             if not confirmed:
                 return error_msg
-            
             # Require text input confirmation
             if __event_call__:
                 try:
@@ -1913,3 +1889,81 @@ class Tools:
             if self.valves.debug_print:
                 traceback.print_exc()
             return error_msg
+
+# NOTE: One-off normalization utility for legacy Episodes.
+# Episodes saved before Graphiti Memory v0.12.1 may have non-normalized valid_at values.
+# If you need to bulk-normalize existing data, uncomment this method and ask the AI to run it once (one-time only).
+# After migration, re-comment or remove it.
+# Compatibility: Neo4j only. FalkorDB is not supported; this method will no-op there.
+# IMPORTANT: Take a database backup before running. This operation updates stored data.
+#
+#    async def normalize_episode_valid_at_to_utc(
+#        self,
+#        __user__: dict = {},
+#        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+#        __event_call__: Optional[Callable[[dict], Any]] = None,
+#    ) -> str:
+#        """
+#        Normalize Episodic.valid_at from LocalDateTime to UTC DateTime in Neo4j.
+#
+#        Executes a single Cypher (for reference):
+#        MATCH (e:Episodic)
+#        WITH e, toString(e.valid_at) AS s
+#        WHERE e.valid_at IS NOT NULL AND NOT s ENDS WITH 'Z'  // localdatetime 判定
+#        WITH e, datetime(e.valid_at) AS dt_utc
+#        SET e.valid_at = datetime({epochMillis: dt_utc.epochMillis, timezone:'UTC'})
+#        RETURN count(e) AS updated
+#
+#        ⚠️ Irreversible. Back up the database before running.
+#        """
+#        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
+#            return "❌ Error: Memory service is not available"
+#
+#        # Reject if backend is not Neo4j (valves setting)
+#        if self.valves.graph_db_backend.lower() != "neo4j":
+#            return "❌ This migration is only supported on Neo4j backend."
+#
+#        # Set user headers in context variable (before any API calls)
+#        headers = self._get_user_info_headers(__user__, None)
+#        if headers:
+#            user_headers_context.set(headers)
+#
+#        # Confirmation dialog is mandatory
+#        if not __event_call__:
+#            return "❌ Error: Confirmation dialog is not available. Cannot run migration without confirmation."
+#
+#        is_japanese = self.helper.is_japanese_preferred(__user__)
+#        title = "valid_at を UTC に正規化しますか？" if is_japanese else "Normalize valid_at to UTC?"
+#        warning = "⚠️ この操作は取り消せません。実行前にバックアップを取ってください。" if is_japanese else "⚠️ This operation cannot be undone. Please back up first."
+#        items = [
+#            "対象: valid_at が LocalDateTime の Episodic ノード（末尾にZが付かないもの）" if is_japanese else "Scope: Episodic nodes whose valid_at is LocalDateTime (strings without trailing 'Z')",
+#            "操作: localdatetime を UTC datetime に変換" if is_japanese else "Action: convert localdatetime to UTC datetime",
+#        ]
+#
+#        confirmed, error_msg = await self.helper.show_confirmation_dialog(
+#            title=title,
+#            items=items,
+#            warning_message=warning,
+#            timeout=self.valves.confirmation_timeout,
+#            __user__=__user__,
+#            __event_call__=__event_call__,
+#        )
+#        if not confirmed:
+#            return error_msg
+#
+#        cypher = """
+#        MATCH (e:Episodic)
+#        WITH e, toString(e.valid_at) AS s
+#        WHERE e.valid_at IS NOT NULL AND NOT s ENDS WITH 'Z'
+#        WITH e, datetime(e.valid_at) AS dt_utc
+#        SET e.valid_at = datetime({epochMillis: dt_utc.epochMillis, timezone:'UTC'})
+#        RETURN count(e) AS updated
+#        """
+#        try:
+#            records, _, _ = await self.helper.graphiti.driver.execute_query(cypher)
+#            updated = records[0]["updated"] if records else 0
+#            return f"✅ normalized valid_at to UTC datetime. Updated: {updated}"
+#        except Exception as e:
+#            if self.valves.debug_print:
+#                traceback.print_exc()
+#            return f"❌ Error during normalization: {e}"
