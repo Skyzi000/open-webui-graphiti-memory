@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.1
+version: 0.3.2
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -1244,6 +1244,76 @@ class Tools:
 
         except Exception as e:
             error_msg = f"❌ Error retrieving recent episodes: {str(e)}"
+            if self.valves.debug_print:
+                traceback.print_exc()
+            return error_msg
+
+    async def get_episode_content(
+        self,
+        uuid: str,
+        __user__: dict = {},
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Get the full content of a specific episode by UUID.
+
+        Unlike search_episodes or get_recent_episodes which show truncated previews,
+        this method returns the complete, untruncated content of an episode.
+
+        :param uuid: The UUID of the episode to retrieve
+        :return: Full episode content with metadata
+        """
+
+        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
+            return "❌ Error: Memory service is not available"
+
+        # Set user headers in context variable (before any API calls)
+        headers = self._get_user_info_headers(__user__, None)
+        if headers:
+            user_headers_context.set(headers)
+            if self.valves.debug_print:
+                print(f"Set user headers in context: {list(headers.keys())}")
+
+        if not uuid or not uuid.strip():
+            return "❌ Error: UUID is required"
+
+        uuid = uuid.strip()
+
+        try:
+            if self.valves.debug_print:
+                print(f"=== get_episode_content: Fetching episode ===")
+                print(f"UUID: {uuid}")
+
+            # Fetch episode by UUID
+            episodes = await EpisodicNode.get_by_uuids(self.helper.graphiti.driver, [uuid])
+
+            if not episodes:
+                return f"❌ Episode not found with UUID: {uuid}"
+
+            episode = episodes[0]
+
+            # Get episode attributes
+            name = getattr(episode, 'name', 'Unknown episode')
+            content = getattr(episode, 'content', '')
+            source = getattr(episode, 'source', 'unknown')
+            source_description = getattr(episode, 'source_description', '')
+            valid_at = getattr(episode, 'valid_at', 'unknown')
+            created_at = getattr(episode, 'created_at', 'unknown')
+
+            # Build result message with full content
+            result = f"📄 **Episode: {name}**\n\n"
+            result += f"**UUID:** `{uuid}`\n"
+            result += f"**Source:** {source}\n"
+            if source_description:
+                result += f"**Source Description:** {source_description}\n"
+            result += f"**Valid At:** {valid_at}\n"
+            result += f"**Created At:** {created_at}\n\n"
+            result += f"**Full Content:**\n```\n{content}\n```"
+
+            return result
+
+        except Exception as e:
+            error_msg = f"❌ Error retrieving episode content: {str(e)}"
             if self.valves.debug_print:
                 traceback.print_exc()
             return error_msg
