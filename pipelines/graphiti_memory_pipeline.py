@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Unlike filters, this pipeline can run on a dedicated pipelines server separate from the main Open WebUI instance while still exposing inlet/outlet hooks to Open WebUI. Important limitations: (1) Open WebUI pipelines currently never receive per-user UserValves, so end users always inherit the defaults defined below, and (2) the core does not forward __event_emitter__ into pipelines, so status updates must fall back to local no-op emitters. If you require per-user settings or live status updates, use the filter implementation instead.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.7.1
+version: 0.7.2
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -41,7 +41,7 @@ import os
 import re
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable, Any
 from urllib.parse import quote
 
@@ -1339,7 +1339,7 @@ class Pipeline:
                                 episode_body=episode_body,
                                 source=EpisodeType.message,
                                 source_description="Chat conversation",
-                                reference_time=datetime.now(),
+                                reference_time=datetime.now(timezone.utc),
                                 group_id=group_id,
                                 update_communities=self.valves.update_communities,
                             ),
@@ -1352,7 +1352,7 @@ class Pipeline:
                                 episode_body=episode_body,
                                 source=EpisodeType.message,
                                 source_description="Chat conversation",
-                                reference_time=datetime.now(),
+                                reference_time=datetime.now(timezone.utc),
                                 update_communities=self.valves.update_communities,
                             ),
                             timeout=self.valves.add_episode_timeout
@@ -1364,7 +1364,7 @@ class Pipeline:
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description="Chat conversation",
-                            reference_time=datetime.now(),
+                            reference_time=datetime.now(timezone.utc),
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
                         )
@@ -1374,7 +1374,7 @@ class Pipeline:
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description="Chat conversation",
-                            reference_time=datetime.now(),
+                            reference_time=datetime.now(timezone.utc),
                             update_communities=self.valves.update_communities,
                         )
                 if self.valves.debug_print:

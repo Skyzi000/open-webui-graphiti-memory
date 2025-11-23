@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.12.0
+version: 0.12.1
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -43,7 +43,7 @@ import re
 import time
 import traceback
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable, Any
 from urllib.parse import quote
 
@@ -3072,7 +3072,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description="Chat conversation",
-                            reference_time=datetime.now(),
+                            reference_time=datetime.now(timezone.utc),
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
                         ),
@@ -3085,7 +3085,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description="Chat conversation",
-                            reference_time=datetime.now(),
+                            reference_time=datetime.now(timezone.utc),
                             update_communities=self.valves.update_communities,
                         ),
                         timeout=self.valves.add_episode_timeout
@@ -3097,7 +3097,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         episode_body=episode_body,
                         source=EpisodeType.message,
                         source_description="Chat conversation",
-                        reference_time=datetime.now(),
+                        reference_time=datetime.now(timezone.utc),
                         group_id=group_id,
                         update_communities=self.valves.update_communities,
                     )
@@ -3107,7 +3107,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         episode_body=episode_body,
                         source=EpisodeType.message,
                         source_description="Chat conversation",
-                        reference_time=datetime.now(),
+                        reference_time=datetime.now(timezone.utc),
                         update_communities=self.valves.update_communities,
                     )
             if self.valves.debug_print:
