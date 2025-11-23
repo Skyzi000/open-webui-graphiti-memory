@@ -1446,6 +1446,43 @@ body {
   border: 1px solid var(--border);
   color: var(--muted);
 }
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.action-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.action-btn {
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+.action-btn:hover {
+  background: var(--surface);
+}
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.action-btn.danger {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+}
+.action-btn.danger:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+}
 .graph-band {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1750,6 +1787,16 @@ body {
             f"{connection_total} related fact{'s' if connection_total != 1 else ''}"
         )
 
+        entity_uuid = entity.get("uuid")
+        delete_controls = ""
+        if entity_uuid:
+            delete_controls = f"""
+  <div class=\"action-row\">
+    <span class=\"action-hint\">Deletes this entity and linked facts after confirmation.</span>
+    <button class=\"action-btn danger\" data-graphiti-entity-delete=\"{self._escape_html_text(entity_uuid)}\" data-graphiti-entity-name=\"{self._escape_html_text(entity.get('name'))}\">Delete Entity</button>
+  </div>
+"""
+
         max_cards = 4
         cards: list[str] = []
         for conn in connections[:max_cards]:
@@ -1797,6 +1844,7 @@ body {
     <span class="title">{title_html}</span>
     <span class="chip chip-muted">{self._escape_html_text(connection_label)}</span>
   </div>
+  {delete_controls}
   <div class="node">
     <div class="node-label">Summary</div>
     <div class="node-title">{title_html}</div>
@@ -1807,7 +1855,55 @@ body {
 """
 
         height = 200 if connection_total == 0 else 420
-        return self._wrap_rich_html(inner.strip(), min_height=height)
+        delete_script = None
+        if entity_uuid:
+            delete_script = """
+(function () {
+  const buttons = document.querySelectorAll('[data-graphiti-entity-delete]');
+  if (!buttons || buttons.length === 0) return;
+
+  const sendPrompt = (promptText) => {
+    let targetOrigin = window.location?.origin || '*';
+    if (!targetOrigin || targetOrigin === 'null') targetOrigin = '*';
+    try {
+      window.parent?.postMessage({ type: 'input:prompt:submit', text: promptText }, targetOrigin);
+    } catch (err) {
+      console.error('Graphiti delete button postMessage failed', err);
+    }
+    // Clear input box after submit so the prompt doesn't linger in the UI.
+    try {
+      window.parent?.postMessage({ type: 'input:prompt', text: '' }, targetOrigin);
+    } catch (err) {
+      console.error('Graphiti delete button postMessage failed', err);
+    }
+  };
+
+  buttons.forEach((btn) => {
+    if (btn.dataset.graphitiDeleteBound) return;
+    btn.dataset.graphitiDeleteBound = 'true';
+
+    btn.addEventListener('click', () => {
+      const uuid = btn.getAttribute('data-graphiti-entity-delete');
+      const name = btn.getAttribute('data-graphiti-entity-name') || 'entity';
+      if (!uuid) return;
+
+      // Sandboxed iframe cannot show modal dialogs; send prompt immediately.
+      const promptLines = [
+        `Delete the Graphiti entity "${name}" (UUID: ${uuid}).`,
+        'Call the "graphiti_memory_manage.delete_by_uuids" tool with node_uuids set to this UUID. If the tool is unavailable, tell the user to enable Graphiti Memory Manage.',
+        'Proceed without asking for more input; show the built-in confirmation dialog.'
+      ];
+
+      const prompt = promptLines.join(String.fromCharCode(10));
+      btn.disabled = true;
+      btn.textContent = 'Requested…';
+      sendPrompt(prompt);
+    });
+  });
+})();
+"""
+
+        return self._wrap_rich_html(inner.strip(), min_height=height, extra_body_script=delete_script)
 
     def _build_overview_graph_data(
         self,
