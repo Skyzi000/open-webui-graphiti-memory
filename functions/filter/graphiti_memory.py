@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.13.0
+version: 0.13.1
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -3154,8 +3154,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
             else:
                 role_label = role.capitalize()
             episode_parts.append(f"{role_label}: {content}")
-        
-        episode_body = "\n".join(episode_parts)
+
+        separator = "\n\n---\n\n"
+        episode_body = separator.join(episode_parts)
         
         if user_valves.show_status:
             await __event_emitter__(
