@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.12.1
+version: 0.13.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -348,6 +348,18 @@ class Filter:
             default=1000,
             description="Maximum number of episode deduplication entries to keep in memory. When this limit is reached, oldest entries will be removed. Default is 1000.",
         )
+        enable_entity_delete_button: bool = Field(
+            default=False,
+            description=(
+                "Show a delete button inside each entity citation card. "
+                "When clicked it posts a chat prompt that asks the Graphiti Memory Manage tool to call "
+                "`graphiti_memory_manage.delete_by_uuids` with the entity UUID. "
+                "Requirements: the Graphiti Memory Manage Tool must be installed/enabled for the current chat, "
+                "and the model must be allowed to run tools. "
+                "Caution: clicking the button immediately sends the deletion prompt to the chat (no extra UI confirmation). "
+                "Experimental feature: may not function in all environments; enable only after confirming it works in yours."
+            ),
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -407,6 +419,10 @@ class Filter:
         episode_dedup_enabled: bool = Field(
             default=True,
             description="Enable duplicate episode detection. When enabled, prevents duplicate episodes (identified by chat_id and episode content hash) from being saved when multiple models respond simultaneously. Automatically allows different assistant responses when save_assistant_response is enabled.",
+        )
+        skip_save_regex: str = Field(
+            default=r"(?s)Delete the Graphiti entity .*graphiti_memory_manage\.delete_by_uuids",
+            description="Regex; if the latest user message matches, outlet will skip saving messages for this turn. Default matches the delete-button prompt. Useful for delete or admin commands. Leave empty to disable.",
         )
 
     def __init__(self):
@@ -1446,6 +1462,43 @@ body {
   border: 1px solid var(--border);
   color: var(--muted);
 }
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.action-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.action-btn {
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+.action-btn:hover {
+  background: var(--surface);
+}
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.action-btn.danger {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+}
+.action-btn.danger:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+}
 .graph-band {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1750,6 +1803,16 @@ body {
             f"{connection_total} related fact{'s' if connection_total != 1 else ''}"
         )
 
+        entity_uuid = entity.get("uuid")
+        delete_controls = ""
+        if entity_uuid and self.valves.enable_entity_delete_button:
+            delete_controls = f"""
+  <div class=\"action-row\">
+    <span class=\"action-hint\">Deletes this entity and linked facts after confirmation.</span>
+    <button class=\"action-btn danger\" data-graphiti-entity-delete=\"{self._escape_html_text(entity_uuid)}\" data-graphiti-entity-name=\"{self._escape_html_text(entity.get('name'))}\">Delete Entity</button>
+  </div>
+"""
+
         max_cards = 4
         cards: list[str] = []
         for conn in connections[:max_cards]:
@@ -1797,6 +1860,7 @@ body {
     <span class="title">{title_html}</span>
     <span class="chip chip-muted">{self._escape_html_text(connection_label)}</span>
   </div>
+  {delete_controls}
   <div class="node">
     <div class="node-label">Summary</div>
     <div class="node-title">{title_html}</div>
@@ -1807,7 +1871,55 @@ body {
 """
 
         height = 200 if connection_total == 0 else 420
-        return self._wrap_rich_html(inner.strip(), min_height=height)
+        delete_script = None
+        if entity_uuid and self.valves.enable_entity_delete_button:
+            delete_script = """
+(function () {
+  const buttons = document.querySelectorAll('[data-graphiti-entity-delete]');
+  if (!buttons || buttons.length === 0) return;
+
+  const sendPrompt = (promptText) => {
+    let targetOrigin = window.location?.origin || '*';
+    if (!targetOrigin || targetOrigin === 'null') targetOrigin = '*';
+    try {
+      window.parent?.postMessage({ type: 'input:prompt:submit', text: promptText }, targetOrigin);
+    } catch (err) {
+      console.error('Graphiti delete button postMessage failed', err);
+    }
+    // Clear input box after submit so the prompt doesn't linger in the UI.
+    try {
+      window.parent?.postMessage({ type: 'input:prompt', text: '' }, targetOrigin);
+    } catch (err) {
+      console.error('Graphiti delete button postMessage failed', err);
+    }
+  };
+
+  buttons.forEach((btn) => {
+    if (btn.dataset.graphitiDeleteBound) return;
+    btn.dataset.graphitiDeleteBound = 'true';
+
+    btn.addEventListener('click', () => {
+      const uuid = btn.getAttribute('data-graphiti-entity-delete');
+      const name = btn.getAttribute('data-graphiti-entity-name') || 'entity';
+      if (!uuid) return;
+
+      // Sandboxed iframe cannot show modal dialogs; send prompt immediately.
+      const promptLines = [
+        `Delete the Graphiti entity "${name}" (UUID: ${uuid}).`,
+        'Call the "graphiti_memory_manage.delete_by_uuids" tool with node_uuids set to this UUID. If the tool is unavailable, tell the user to enable Graphiti Memory Manage.',
+        'Proceed without asking for more input; show the built-in confirmation dialog.'
+      ];
+
+      const prompt = promptLines.join(String.fromCharCode(10));
+      btn.disabled = true;
+      btn.textContent = 'Requested…';
+      sendPrompt(prompt);
+    });
+  });
+})();
+"""
+
+        return self._wrap_rich_html(inner.strip(), min_height=height, extra_body_script=delete_script)
 
     def _build_overview_graph_data(
         self,
@@ -2541,6 +2653,22 @@ window.addEventListener('resize', renderGraph, { passive: true });
         
         return sanitized
 
+    @staticmethod
+    def _should_skip_save(latest_user_content: str | None, pattern: str | None) -> bool:
+        """
+        Return True if the latest user content matches the provided regex pattern.
+        Empty pattern disables skipping.
+        """
+        if not pattern:
+            return False
+        try:
+            regex = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            return False
+        if latest_user_content is None:
+            return False
+        return bool(regex.search(latest_user_content))
+
     async def inlet(
         self,
         body: dict,
@@ -2992,6 +3120,20 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 messages_to_save.append(("assistant", assistant_content))
         
         if len(messages_to_save) == 0:
+            return body
+
+        # Skip saving when the latest user message matches skip_save_regex
+        latest_user_content = self._get_content_from_message(last_user_message) if last_user_message else None
+        if self._should_skip_save(latest_user_content, getattr(user_valves, "skip_save_regex", "")):
+            if self.valves.debug_print:
+                print("Skipping save for this turn due to skip_save_regex match.")
+            if user_valves.show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "⏭️ Memory save skipped for this turn (skip_save_regex matched).", "done": True},
+                    }
+                )
             return body
         
         # Construct episode body in "Assistant: {message}\nUser: {message}\nAssistant: {message}" format for EpisodeType.message
