@@ -348,6 +348,18 @@ class Filter:
             default=1000,
             description="Maximum number of episode deduplication entries to keep in memory. When this limit is reached, oldest entries will be removed. Default is 1000.",
         )
+        enable_entity_delete_button: bool = Field(
+            default=False,
+            description=(
+                "Show a delete button inside each entity citation card. "
+                "When clicked it posts a chat prompt that asks the Graphiti Memory Manage tool to call "
+                "`graphiti_memory_manage.delete_by_uuids` with the entity UUID. "
+                "Requirements: the Graphiti Memory Manage Tool must be installed/enabled for the current chat, "
+                "and the model must be allowed to run tools. "
+                "Caution: clicking the button immediately sends the deletion prompt to the chat (no extra UI confirmation). "
+                "Experimental feature: may not function in all environments; enable only after confirming it works in yours."
+            ),
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -1789,7 +1801,7 @@ body {
 
         entity_uuid = entity.get("uuid")
         delete_controls = ""
-        if entity_uuid:
+        if entity_uuid and self.valves.enable_entity_delete_button:
             delete_controls = f"""
   <div class=\"action-row\">
     <span class=\"action-hint\">Deletes this entity and linked facts after confirmation.</span>
@@ -1856,7 +1868,7 @@ body {
 
         height = 200 if connection_total == 0 else 420
         delete_script = None
-        if entity_uuid:
+        if entity_uuid and self.valves.enable_entity_delete_button:
             delete_script = """
 (function () {
   const buttons = document.querySelectorAll('[data-graphiti-entity-delete]');
