@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.13.1
+version: 0.13.2
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -42,7 +42,7 @@ import os
 import re
 import time
 import traceback
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable, Any
 from urllib.parse import quote
@@ -74,6 +74,12 @@ from graphiti_core.search.search_config import (
     EpisodeReranker,
 )
 from graphiti_core.driver.falkordb_driver import FalkorDriver
+
+# Chats import may fail if running outside Open WebUI core (e.g., raw file import)
+try:
+    from open_webui.models.chats import Chats
+except Exception:  # pragma: no cover - fallback for non-core environments
+    Chats = None
 
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
@@ -348,6 +354,10 @@ class Filter:
             default=1000,
             description="Maximum number of episode deduplication entries to keep in memory. When this limit is reached, oldest entries will be removed. Default is 1000.",
         )
+        chat_title_cache_limit: int = Field(
+            default=500,
+            description="Maximum number of chat titles to keep in the in-memory LRU cache when resolving source_description. Older entries are evicted when the limit is exceeded.",
+        )
         enable_entity_delete_button: bool = Field(
             default=False,
             description=(
@@ -435,6 +445,8 @@ class Filter:
         # Episode deduplication tracking: {(chat_id, episode_hash): timestamp}
         self._processed_episodes: dict[tuple[str, str], float] = {}
         self._episodes_lock = asyncio.Lock()
+        # Cache chat titles fetched from Open WebUI Chats model to reduce DB hits (bounded LRU)
+        self._chat_title_cache: OrderedDict[str, str] = OrderedDict()
         # Defer Graphiti initialization until inlet()/outlet() needs it
         if self.valves.debug_print:
             print("Graphiti initialization deferred until first use")
@@ -945,6 +957,38 @@ class Filter:
             str(chat_id),
             str(message_id),
         )
+
+    def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
+        """
+        Resolve chat title from Open WebUI Chats model with simple caching.
+        Falls back to None on errors or when chat_id is missing/unknown.
+        """
+
+        if Chats is None:
+            return None
+
+        if not chat_id or chat_id == "unknown":
+            return None
+
+        cached = self._chat_title_cache.get(chat_id)
+        if cached is not None:
+            # Refresh LRU position
+            self._chat_title_cache.move_to_end(chat_id)
+            return cached
+
+        try:
+            title = Chats.get_chat_title_by_id(str(chat_id))
+            if title:
+                self._chat_title_cache[chat_id] = title
+                self._chat_title_cache.move_to_end(chat_id)
+
+                # Enforce LRU size using current valve value (defaults to 500)
+                cache_limit = int(self.valves.chat_title_cache_limit or 0) or 500
+                if cache_limit > 0 and len(self._chat_title_cache) > cache_limit:
+                    self._chat_title_cache.popitem(last=False)
+            return title
+        except Exception:
+            return None
 
     def _cleanup_expired_citations_locked(self, now: Optional[float] = None) -> None:
         """
@@ -3206,6 +3250,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 self._cleanup_old_episodes()
 
         try:
+            # Resolve chat title for source_description (fall back to default if unavailable)
+            chat_title = self._get_chat_title(chat_id) or "New Chat"
+
             # Apply timeout if configured
             if self.valves.add_episode_timeout > 0:
                 if group_id is not None:
@@ -3214,7 +3261,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             name=f"Chat_Interaction_{chat_id}_{message_id}",
                             episode_body=episode_body,
                             source=EpisodeType.message,
-                            source_description="Chat conversation",
+                            source_description=chat_title,
                             reference_time=datetime.now(timezone.utc),
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
@@ -3227,7 +3274,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             name=f"Chat_Interaction_{chat_id}_{message_id}",
                             episode_body=episode_body,
                             source=EpisodeType.message,
-                            source_description="Chat conversation",
+                            source_description=chat_title,
                             reference_time=datetime.now(timezone.utc),
                             update_communities=self.valves.update_communities,
                         ),
@@ -3239,7 +3286,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         name=f"Chat_Interaction_{chat_id}_{message_id}",
                         episode_body=episode_body,
                         source=EpisodeType.message,
-                        source_description="Chat conversation",
+                        source_description=chat_title,
                         reference_time=datetime.now(timezone.utc),
                         group_id=group_id,
                         update_communities=self.valves.update_communities,
@@ -3249,7 +3296,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         name=f"Chat_Interaction_{chat_id}_{message_id}",
                         episode_body=episode_body,
                         source=EpisodeType.message,
-                        source_description="Chat conversation",
+                        source_description=chat_title,
                         reference_time=datetime.now(timezone.utc),
                         update_communities=self.valves.update_communities,
                     )
