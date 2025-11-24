@@ -420,6 +420,10 @@ class Filter:
             default=True,
             description="Enable duplicate episode detection. When enabled, prevents duplicate episodes (identified by chat_id and episode content hash) from being saved when multiple models respond simultaneously. Automatically allows different assistant responses when save_assistant_response is enabled.",
         )
+        skip_save_regex: str = Field(
+            default=r"(?s)Delete the Graphiti entity .*graphiti_memory_manage\.delete_by_uuids",
+            description="Regex; if the latest user message matches, outlet will skip saving messages for this turn. Default matches the delete-button prompt. Useful for delete or admin commands. Leave empty to disable.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -2649,6 +2653,22 @@ window.addEventListener('resize', renderGraph, { passive: true });
         
         return sanitized
 
+    @staticmethod
+    def _should_skip_save(latest_user_content: str | None, pattern: str | None) -> bool:
+        """
+        Return True if the latest user content matches the provided regex pattern.
+        Empty pattern disables skipping.
+        """
+        if not pattern:
+            return False
+        try:
+            regex = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            return False
+        if latest_user_content is None:
+            return False
+        return bool(regex.search(latest_user_content))
+
     async def inlet(
         self,
         body: dict,
@@ -3100,6 +3120,20 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 messages_to_save.append(("assistant", assistant_content))
         
         if len(messages_to_save) == 0:
+            return body
+
+        # Skip saving when the latest user message matches skip_save_regex
+        latest_user_content = self._get_content_from_message(last_user_message) if last_user_message else None
+        if self._should_skip_save(latest_user_content, getattr(user_valves, "skip_save_regex", "")):
+            if self.valves.debug_print:
+                print("Skipping save for this turn due to skip_save_regex match.")
+            if user_valves.show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "⏭️ Memory save skipped for this turn (skip_save_regex matched).", "done": True},
+                    }
+                )
             return body
         
         # Construct episode body in "Assistant: {message}\nUser: {message}\nAssistant: {message}" format for EpisodeType.message
