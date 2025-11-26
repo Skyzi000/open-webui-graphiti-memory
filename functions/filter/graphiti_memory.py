@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.13.4
+version: 0.14.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -354,6 +354,26 @@ class Filter:
             default=1000,
             description="Maximum number of episode deduplication entries to keep in memory. When this limit is reached, oldest entries will be removed. Default is 1000.",
         )
+        dedup_use_redis: bool = Field(
+            default=(
+                os.environ.get("WEBSOCKET_MANAGER", "").lower() == "redis"
+            ),
+            description=(
+                "Use Redis for episode deduplication. Defaults to True when WEBSOCKET_MANAGER=redis. "
+                "When enabled but Redis is unreachable, automatically falls back to in-memory dedup."
+            ),
+        )
+        redis_dedup_url: str = Field(
+            default=os.environ.get("REDIS_URL", ""),
+            description="Redis URL for episode deduplication (only used when dedup_use_redis is True). Defaults to env REDIS_URL.",
+        )
+        redis_dedup_key_prefix: str = Field(
+            default="",
+            description=(
+                "Key prefix for Redis-based episode deduplication. "
+                "If empty, defaults to 'owui:{filter_id}:episode_dedup' to avoid collisions when multiple copies are installed."
+            ),
+        )
         chat_title_cache_limit: int = Field(
             default=500,
             description="Maximum number of chat titles to keep in the in-memory LRU cache when resolving source_description. Older entries are evicted when the limit is exceeded.",
@@ -445,6 +465,9 @@ class Filter:
         # Episode deduplication tracking: {(chat_id, episode_hash): timestamp}
         self._processed_episodes: dict[tuple[str, str], float] = {}
         self._episodes_lock = asyncio.Lock()
+        # Redis client for global dedup (lazy init)
+        self._redis_dedup = None
+        self._redis_dedup_lock = asyncio.Lock()
         # Cache chat titles fetched from Open WebUI Chats model to reduce DB hits (bounded LRU)
         self._chat_title_cache: OrderedDict[str, str] = OrderedDict()
         # Defer Graphiti initialization until inlet()/outlet() needs it
@@ -744,6 +767,35 @@ class Filter:
             )
             keep_count = self.valves.episode_dedup_max_entries
             self._processed_episodes = dict(sorted_items[-keep_count:])
+
+    async def _get_redis_dedup_client(self):
+        """
+        Lazily get an asyncio Redis client for dedup; returns None on failure.
+        """
+        if self._redis_dedup:
+            return self._redis_dedup
+        async with self._redis_dedup_lock:
+            if self._redis_dedup:
+                return self._redis_dedup
+            if not self.valves.redis_dedup_url:
+                return None
+            try:
+                from redis import asyncio as aioredis  # Lazy import to avoid hard dependency
+
+                self._redis_dedup = aioredis.from_url(
+                    self.valves.redis_dedup_url,
+                    decode_responses=False,
+                )
+                # Optional ping to verify connectivity
+                await self._redis_dedup.ping()
+                if self.valves.debug_print:
+                    print("Redis dedup client initialized")
+                return self._redis_dedup
+            except Exception as e:
+                if self.valves.debug_print:
+                    print(f"Redis dedup unavailable, falling back to memory: {e}")
+                self._redis_dedup = None
+                return None
 
     def _get_group_id(self, user: dict) -> Optional[str]:
         """
@@ -3096,9 +3148,11 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
+        __id__: Optional[str] = None,
     ) -> dict:
         # Flush any pending citations immediately so they show up before long-running work
         await self._flush_pending_citations(__event_emitter__, __metadata__)
+        filter_id_for_prefix = __id__ or "graphiti_memory"
 
         # Check if user has disabled the feature
         if __user__:
@@ -3246,7 +3300,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
 
         # Store add_episode results for detailed status display
         add_results = None
-        episode_key = None
+        episode_key: str | tuple[str, str] | None = None
         episode_dedup_added = False
 
         # Check for duplicate episodes if enabled
@@ -3255,29 +3309,67 @@ window.addEventListener('resize', renderGraph, { passive: true });
             # This allows detection when multiple models respond simultaneously with same content
             # but won't block when assistant responses differ (e.g., save_assistant_response=True)
             episode_hash = hashlib.sha256(episode_body.encode()).hexdigest()
-            episode_key = (chat_id, episode_hash)
+            use_redis = (
+                self.valves.dedup_use_redis
+                and bool(self.valves.redis_dedup_url)
+            )
 
-            async with self._episodes_lock:
-                # Check if this episode has already been processed
-                if episode_key in self._processed_episodes:
-                    if self.valves.debug_print:
-                        print(f"Skipping duplicate episode: chat_id={chat_id}, hash={episode_hash[:16]}...")
-                    # Skip processing for this duplicate episode
-                    if user_valves.show_status:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {"description": f"⏭️ Skipped duplicate episode (already processed)", "done": True},
-                            }
+            if use_redis:
+                prefix = (
+                    self.valves.redis_dedup_key_prefix
+                    or f"owui:{filter_id_for_prefix}:episode_dedup"
+                )
+                dedup_key_str = f"{prefix}:{chat_id}:{episode_hash}"
+                redis_client = await self._get_redis_dedup_client()
+                if redis_client:
+                    try:
+                        set_ok = await redis_client.set(
+                            dedup_key_str,
+                            b"1",
+                            ex=self.valves.episode_dedup_time_window,
+                            nx=True,
                         )
-                    return body
+                        if not set_ok:
+                            if self.valves.debug_print:
+                                print(f"Redis dedup hit: {dedup_key_str}")
+                            if user_valves.show_status:
+                                await __event_emitter__(
+                                    {
+                                        "type": "status",
+                                        "data": {"description": f"⏭️ Skipped duplicate episode (already processed)", "done": True},
+                                    }
+                                )
+                            return body
+                        episode_key = dedup_key_str
+                        episode_dedup_added = True
+                    except Exception as e:
+                        if self.valves.debug_print:
+                            print(f"Redis dedup error, fallback to memory: {e}")
+                        # fall through to memory dedup
 
-                # Mark as processed immediately (before add_episode starts)
-                self._processed_episodes[episode_key] = time.time()
-                episode_dedup_added = True
+            if not episode_dedup_added:
+                episode_key = (str(chat_id), episode_hash)
+                async with self._episodes_lock:
+                    # Check if this episode has already been processed
+                    if episode_key in self._processed_episodes:
+                        if self.valves.debug_print:
+                            print(f"Skipping duplicate episode (memory): chat_id={chat_id}, hash={episode_hash[:16]}...")
+                        # Skip processing for this duplicate episode
+                        if user_valves.show_status:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {"description": f"⏭️ Skipped duplicate episode (already processed)", "done": True},
+                                }
+                            )
+                        return body
 
-                # Clean up old entries
-                self._cleanup_old_episodes()
+                    # Mark as processed immediately (before add_episode starts)
+                    self._processed_episodes[episode_key] = time.time()
+                    episode_dedup_added = True
+
+                    # Clean up old entries
+                    self._cleanup_old_episodes()
 
         try:
             # Count user turns for labeling
@@ -3413,8 +3505,16 @@ window.addEventListener('resize', renderGraph, { passive: true });
         finally:
             # If saving failed, remove the dedup marker so retries are allowed
             if user_valves.episode_dedup_enabled and episode_dedup_added and saved_count == 0 and episode_key:
-                async with self._episodes_lock:
-                    self._processed_episodes.pop(episode_key, None)
+                if isinstance(episode_key, str):
+                    try:
+                        redis_client = await self._get_redis_dedup_client()
+                        if redis_client:
+                            await redis_client.delete(episode_key)
+                    except Exception:
+                        pass
+                elif isinstance(episode_key, tuple):
+                    async with self._episodes_lock:
+                        self._processed_episodes.pop(episode_key, None)
         
         # Only increment count for successfully saved messages
         if saved_count > 0:
