@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.13.2
+version: 0.13.3
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -77,7 +77,7 @@ from graphiti_core.driver.falkordb_driver import FalkorDriver
 
 # Chats import may fail if running outside Open WebUI core (e.g., raw file import)
 try:
-    from open_webui.models.chats import Chats
+    from open_webui.models.chats import Chats  # type: ignore
 except Exception:  # pragma: no cover - fallback for non-core environments
     Chats = None
 
@@ -3250,18 +3250,30 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 self._cleanup_old_episodes()
 
         try:
+            # Count user turns for labeling
+            user_turn_index = sum(1 for m in messages if m.get("role") == "user")
+
             # Resolve chat title for source_description (fall back to default if unavailable)
             chat_title = self._get_chat_title(chat_id) or "New Chat"
+            source_description = (
+                f"{chat_title}_turn{user_turn_index}"
+                if user_turn_index > 0
+                else chat_title
+            )
+
+            # Build descriptive episode name: <UTC timestamp>_Chat_<chat_id>_turn<message_count>
+            timestamp_prefix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            episode_name = f"{timestamp_prefix}_Chat_{chat_id}_turn{user_turn_index}"
 
             # Apply timeout if configured
             if self.valves.add_episode_timeout > 0:
                 if group_id is not None:
                     add_results = await asyncio.wait_for(
                         self.graphiti.add_episode(
-                            name=f"Chat_Interaction_{chat_id}_{message_id}",
+                            name=episode_name,
                             episode_body=episode_body,
                             source=EpisodeType.message,
-                            source_description=chat_title,
+                            source_description=source_description,
                             reference_time=datetime.now(timezone.utc),
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
@@ -3271,10 +3283,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 else:
                     add_results = await asyncio.wait_for(
                         self.graphiti.add_episode(
-                            name=f"Chat_Interaction_{chat_id}_{message_id}",
+                            name=episode_name,
                             episode_body=episode_body,
                             source=EpisodeType.message,
-                            source_description=chat_title,
+                            source_description=source_description,
                             reference_time=datetime.now(timezone.utc),
                             update_communities=self.valves.update_communities,
                         ),
@@ -3283,23 +3295,24 @@ window.addEventListener('resize', renderGraph, { passive: true });
             else:
                 if group_id is not None:
                     add_results = await self.graphiti.add_episode(
-                        name=f"Chat_Interaction_{chat_id}_{message_id}",
+                        name=episode_name,
                         episode_body=episode_body,
                         source=EpisodeType.message,
-                        source_description=chat_title,
+                        source_description=source_description,
                         reference_time=datetime.now(timezone.utc),
                         group_id=group_id,
                         update_communities=self.valves.update_communities,
                     )
                 else:
                     add_results = await self.graphiti.add_episode(
-                        name=f"Chat_Interaction_{chat_id}_{message_id}",
+                        name=episode_name,
                         episode_body=episode_body,
                         source=EpisodeType.message,
-                        source_description=chat_title,
+                        source_description=source_description,
                         reference_time=datetime.now(timezone.utc),
                         update_communities=self.valves.update_communities,
                     )
+
             if self.valves.debug_print:
                 print(f"Added conversation to Graphiti memory: {episode_body[:100]}...")
                 if add_results:
