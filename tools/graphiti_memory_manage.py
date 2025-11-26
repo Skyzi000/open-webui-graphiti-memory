@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.2
+version: 0.3.3
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -230,6 +230,23 @@ class GraphitiHelper:
         # Sort keys for consistent hashing
         config_str = '|'.join(f"{k}={v}" for k, v in sorted(valve_dict.items()))
         return hashlib.md5(config_str.encode()).hexdigest()
+
+    def config_ready(self) -> tuple[bool, str]:
+        """Return (ready, reason). Prevent init with placeholder defaults after restart."""
+        if not (self.valves.api_key or "").strip():
+            return False, "api_key is empty"
+
+        backend = (self.valves.graph_db_backend or "").lower().strip()
+        if backend == "neo4j":
+            # Allow default credentials; assume explicit API key means the admin intends this config
+            pass
+        elif backend == "falkordb":
+            # Accept default host/port; API key guard already applied
+            pass
+        else:
+            return False, f"Unsupported backend '{self.valves.graph_db_backend}'"
+
+        return True, ""
     
     def config_changed(self) -> bool:
         """Check if configuration has changed."""
@@ -243,6 +260,12 @@ class GraphitiHelper:
     def initialize_graphiti(self):
         """Initialize Graphiti with configured settings."""
         if self.graphiti is not None and not self.config_changed():
+            return
+
+        ready, reason = self.config_ready()
+        if not ready:
+            if self.valves.debug_print:
+                print(f"Graphiti init skipped: {reason}")
             return
         
         if self.valves.debug_print:
@@ -337,6 +360,11 @@ class GraphitiHelper:
     
     async def ensure_graphiti_initialized(self) -> bool:
         """Ensure Graphiti is initialized, retry if needed."""
+        ready, reason = self.config_ready()
+        if not ready:
+            if self.valves.debug_print:
+                print(f"Graphiti init skipped: {reason}")
+            return False
         if self.graphiti is None or self.config_changed():
             try:
                 if self.valves.debug_print:

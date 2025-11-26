@@ -4,7 +4,7 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.1.1
+version: 0.1.2
 requirements: graphiti-core[falkordb]
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
 
@@ -274,12 +274,9 @@ class Action:
         self.graphiti = None
         self._indices_built = False
         self._last_config = None
-        # Try to initialize
-        try:
-            self._initialize_graphiti()
-        except Exception as e:
-            if self.valves.debug_print:
-                print(f"Initial Graphiti initialization skipped: {e}")
+        # Defer initialization until ensure_graphiti_initialized is called
+        if self.valves.debug_print:
+            print("Graphiti initialization deferred until first use")
     
     def _get_config_hash(self) -> str:
         """Generate hash of current configuration for change detection"""
@@ -294,6 +291,24 @@ class Action:
         """Check if configuration has changed since last initialization"""
         current_hash = self._get_config_hash()
         return self._last_config != current_hash
+
+    def _config_ready(self) -> tuple[bool, str]:
+        """Prevent init when valves are still placeholders (e.g., right after restart)."""
+        if not (self.valves.api_key or "").strip():
+            return False, "api_key is empty"
+
+        backend = (self.valves.graph_db_backend or "").lower().strip()
+
+        if backend == "neo4j":
+            # Allow default credentials; assume explicit API key means the admin intends this config
+            pass
+        elif backend == "falkordb":
+            # Allow default host/port; API key guard already applied
+            pass
+        else:
+            return False, f"Unsupported backend '{self.valves.graph_db_backend}'"
+
+        return True, ""
     
     def _initialize_graphiti(self) -> bool:
         """Initialize Graphiti instance with configured backend"""
@@ -395,6 +410,11 @@ class Action:
     
     async def _ensure_graphiti_initialized(self) -> bool:
         """Ensure Graphiti is initialized and ready"""
+        ready, reason = self._config_ready()
+        if not ready:
+            if self.valves.debug_print:
+                print(f"Graphiti init skipped: {reason}")
+            return False
         if self._config_changed():
             if self.valves.debug_print:
                 print("Configuration changed, reinitializing Graphiti...")
@@ -725,4 +745,3 @@ class Action:
                     )
         
         return None
-

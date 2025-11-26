@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.13.3
+version: 0.13.4
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -494,6 +494,30 @@ class Filter:
                     print(f"Configuration change detected, will reinitialize Graphiti")
             return True
         return False
+
+    def _config_ready(self) -> tuple[bool, str]:
+        """
+        Lightweight readiness check to avoid initializing Graphiti with placeholder defaults.
+        Returns (ready, reason). When ready is False, caller should skip init and try later.
+        """
+        # API key is required for all Graphiti LLM and embedding calls
+        if not (self.valves.api_key or "").strip():
+            return False, "api_key is empty"
+
+        backend = (self.valves.graph_db_backend or "").lower().strip()
+
+        if backend == "neo4j":
+            # Allow default credentials; assume explicit API key means the admin intends this config
+            pass
+        elif backend == "falkordb":
+            # FalkorDB default host/port can be legitimate, so only gate on missing auth combo
+            if self.valves.falkordb_username is None and self.valves.falkordb_password is None:
+                # Allow unauthenticated local dev, but still require explicit API key above
+                pass
+        else:
+            return False, f"Unsupported backend '{self.valves.graph_db_backend}'"
+
+        return True, ""
     
     def _get_user_info_headers(self, user: Optional[dict] = None, chat_id: Optional[str] = None) -> dict:
         """
@@ -670,6 +694,12 @@ class Filter:
         Returns:
             bool: True if Graphiti is ready to use, False otherwise
         """
+        # If valves are still defaults (common immediately after server restart), skip init quietly
+        ready, reason = self._config_ready()
+        if not ready:
+            if self.valves.debug_print:
+                print(f"Graphiti init skipped: {reason}")
+            return False
         # Check if configuration changed - if so, force reinitialization
         if self._config_changed():
             if self.valves.debug_print:
