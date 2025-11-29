@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.15.3
+version: 0.16.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -396,12 +396,10 @@ class Filter:
             default=False,
             description=(
                 "Show a delete button inside each entity citation card. "
-                "When clicked it posts a chat prompt that asks the Graphiti Memory Manage tool to call "
-                "`graphiti_memory_manage.delete_by_uuids` with the entity UUID. "
-                "Requirements: the Graphiti Memory Manage Tool must be installed/enabled for the current chat, "
-                "and the model must be allowed to run tools. "
-                "Caution: clicking the button immediately sends the deletion prompt to the chat (no extra UI confirmation). "
-                "Experimental feature: may not function in all environments; enable only after confirming it works in yours."
+                "When clicked, it sends a /graphiti-delete-entity command that the Filter processes directly "
+                "(no AI/Tool dependency). Click twice to confirm deletion. "
+                "Note: The deletion result will be shown via AI response, but the actual deletion "
+                "is performed by the Filter without AI involvement."
             ),
         )
 
@@ -465,12 +463,16 @@ class Filter:
             description="Enable duplicate episode detection. When enabled, prevents duplicate episodes (identified by chat_id and episode content hash) from being saved when multiple models respond simultaneously. Automatically allows different assistant responses when save_assistant_response is enabled.",
         )
         skip_save_regex: str = Field(
-            default=r"(?s)^Delete the Graphiti entity .*graphiti_memory_manage\.delete_by_uuids",
-            description="Regex; if the latest user message matches, the entire turn (user message and current assistant response) is skipped. Additionally, in the next turn, the previous_assistant (which was the response to the matched message) is also skipped to prevent saving command responses. Default matches messages starting with the delete-button prompt. Useful for delete or admin commands. Leave empty to disable.",
+            default=r"^/graphiti-delete-entity\s",
+            description="Regex; if the latest user message matches, the entire turn (user message and current assistant response) is skipped. Additionally, in the next turn, the previous_assistant (which was the response to the matched message) is also skipped to prevent saving command responses. Default matches the delete command format. Useful for delete or admin commands. Leave empty to disable.",
         )
         ui_language: str = Field(
             default="en",
             description="Language for UI labels and status messages: 'en' (English) or 'ja' (Japanese)",
+        )
+        enable_delete_command: bool = Field(
+            default=True,
+            description="Enable the /graphiti-delete-entity command for deleting entities directly from the Filter (no AI/Tool dependency). When enabled, clicking the delete button in entity citations sends a command that the Filter processes directly.",
         )
 
     def __init__(self):
@@ -488,6 +490,10 @@ class Filter:
         self._redis_lock = asyncio.Lock()
         # Cache chat titles fetched from Open WebUI Chats model to reduce DB hits (bounded LRU)
         self._chat_title_cache: OrderedDict[str, str] = OrderedDict()
+        # Delete request deduplication: {(chat_id, entity_uuid): timestamp}
+        # Ensures only one model executes the delete when multiple models run simultaneously
+        self._processed_deletes: dict[tuple[str, str], float] = {}
+        self._deletes_lock = asyncio.Lock()
         # Defer Graphiti initialization until inlet()/outlet() needs it
         if self.valves.debug_print:
             print("Graphiti initialization deferred until first use")
@@ -786,6 +792,360 @@ class Filter:
             )
             keep_count = self.valves.episode_dedup_max_entries
             self._processed_episodes = dict(sorted_items[-keep_count:])
+
+    def _cleanup_old_deletes(self) -> None:
+        """
+        Clean up old processed delete entries. Called while holding self._deletes_lock.
+        Uses same time window as episode dedup for simplicity.
+        """
+        current_time = time.time()
+        cutoff_time = current_time - self.valves.episode_dedup_time_window
+
+        self._processed_deletes = {
+            key: timestamp
+            for key, timestamp in self._processed_deletes.items()
+            if timestamp > cutoff_time
+        }
+
+        # Enforce max entries limit
+        max_entries = 100  # Delete commands are less frequent, smaller limit is fine
+        if len(self._processed_deletes) > max_entries:
+            sorted_items = sorted(
+                self._processed_deletes.items(),
+                key=lambda x: x[1]
+            )
+            self._processed_deletes = dict(sorted_items[-max_entries:])
+
+    async def _try_acquire_delete_lock(
+        self,
+        chat_id: str,
+        entity_uuid: str,
+    ) -> bool:
+        """
+        Try to acquire a lock for entity deletion. Returns True if this is the first
+        request for this (chat_id, entity_uuid) combination.
+        Uses Redis for distributed environments, falls back to in-memory.
+        
+        Note: message_id is NOT used because each model gets a unique message_id,
+        which would prevent deduplication across multiple models.
+        
+        Args:
+            chat_id: Chat identifier
+            entity_uuid: UUID of the entity to delete
+            
+        Returns:
+            True if lock acquired (should proceed with deletion), False if already processed
+        """
+        lock_key = (chat_id, entity_uuid)
+        current_time = time.time()
+        
+        # Try Redis first if enabled
+        if self.valves.use_redis and self.valves.redis_url:
+            redis_client = await self._get_redis_client()
+            if redis_client:
+                try:
+                    base_prefix = self.valves.redis_key_prefix or "owui:graphiti"
+                    redis_key = f"{base_prefix}:delete_lock:{chat_id}:{entity_uuid}"
+                    # Use SETNX (SET if Not eXists) for atomic lock acquisition
+                    # TTL of 60 seconds should be more than enough for delete operation
+                    acquired = await redis_client.set(redis_key, "1", nx=True, ex=60)
+                    if self.valves.debug_print:
+                        print(f"Redis delete lock {'acquired' if acquired else 'already held'}: {redis_key}")
+                    return bool(acquired)
+                except Exception as e:
+                    if self.valves.debug_print:
+                        print(f"Redis delete lock failed, falling back to memory: {e}")
+        
+        # In-memory fallback
+        async with self._deletes_lock:
+            self._cleanup_old_deletes()
+            
+            if lock_key in self._processed_deletes:
+                if self.valves.debug_print:
+                    print(f"Delete already processed (in-memory): {lock_key}")
+                return False
+            
+            self._processed_deletes[lock_key] = current_time
+            if self.valves.debug_print:
+                print(f"Delete lock acquired (in-memory): {lock_key}")
+            return True
+
+    async def _release_delete_lock(
+        self,
+        chat_id: str,
+        entity_uuid: str,
+    ) -> None:
+        """
+        Release a previously acquired delete lock.
+        Called when deletion fails so the user can retry immediately.
+        
+        Args:
+            chat_id: Chat identifier
+            entity_uuid: UUID of the entity
+        """
+        lock_key = (chat_id, entity_uuid)
+        
+        # Release Redis lock if enabled
+        if self.valves.use_redis and self.valves.redis_url:
+            redis_client = await self._get_redis_client()
+            if redis_client:
+                try:
+                    base_prefix = self.valves.redis_key_prefix or "owui:graphiti"
+                    redis_key = f"{base_prefix}:delete_lock:{chat_id}:{entity_uuid}"
+                    await redis_client.delete(redis_key)
+                    if self.valves.debug_print:
+                        print(f"Redis delete lock released: {redis_key}")
+                except Exception as e:
+                    if self.valves.debug_print:
+                        print(f"Failed to release Redis delete lock: {e}")
+        
+        # Release in-memory lock
+        async with self._deletes_lock:
+            if lock_key in self._processed_deletes:
+                del self._processed_deletes[lock_key]
+                if self.valves.debug_print:
+                    print(f"Delete lock released (in-memory): {lock_key}")
+
+    async def _handle_delete_command(
+        self,
+        body: dict,
+        content: str,
+        user_valves: "Filter.UserValves",
+        is_ja: bool,
+        __event_emitter__: Callable[[Any], Awaitable[None]],
+        __event_call__: Optional[Callable[[Any], Awaitable[Any]]],
+        __user__: Optional[dict],
+        __metadata__: Optional[dict],
+    ) -> dict:
+        """
+        Handle the /graphiti-delete-entity command.
+        
+        Command format: /graphiti-delete-entity UUID [EntityName]
+        
+        This method:
+        1. Parses the command to extract UUID and optional entity name
+        2. Acquires a distributed lock to prevent duplicate deletions
+        3. Executes the deletion via Graphiti
+        4. Returns a modified body that instructs the AI to confirm the deletion
+        
+        Note: User confirmation is handled by the JavaScript UI (two-click confirmation)
+        before this command is sent. No server-side confirmation dialog is used.
+        
+        Args:
+            body: Original request body
+            content: The user message content containing the command
+            user_valves: User-specific settings
+            is_ja: Whether Japanese language is preferred
+            __event_emitter__: Event emitter for status updates
+            __event_call__: Not used (kept for signature compatibility)
+            __user__: User information dict
+            __metadata__: Request metadata including chat_id, message_id
+            
+        Returns:
+            Modified body dict with instructions for the AI
+        """
+        if self.valves.debug_print:
+            print(f"Processing delete command: {content[:100]}...")
+        
+        # Parse command: /graphiti-delete-entity UUID [EntityName]
+        # UUID is required, EntityName is optional (may contain spaces)
+        parts = content[len("/graphiti-delete-entity "):].strip().split(" ", 1)
+        if not parts or not parts[0]:
+            # Invalid command format
+            error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+        
+        entity_uuid = parts[0].strip()
+        entity_name = parts[1].strip() if len(parts) > 1 else entity_uuid
+        
+        # Validate UUID format (basic check)
+        if len(entity_uuid) < 10 or not all(c in "0123456789abcdef-" for c in entity_uuid.lower()):
+            error_msg = f"無効なUUID形式です: {entity_uuid}" if is_ja else f"Invalid UUID format: {entity_uuid}"
+            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+        
+        # Get identifiers for deduplication
+        chat_id = __metadata__.get("chat_id", "unknown") if __metadata__ else "unknown"
+        
+        # Try to acquire delete lock (prevents duplicate execution when multiple models run)
+        # Note: We only use chat_id + entity_uuid, not message_id, because each model
+        # gets a unique message_id which would break deduplication
+        if not await self._try_acquire_delete_lock(chat_id, entity_uuid):
+            # Another model already processing this delete
+            if self.valves.debug_print:
+                print(f"Delete already being processed by another model: {entity_uuid}")
+            skip_msg = f"エンティティ「{entity_name}」の削除は既に別のモデルが処理中です。" if is_ja else f"Deletion of entity \"{entity_name}\" is already being processed by another model."
+            return self._build_delete_response_body(body, skip_msg, success=True, is_ja=is_ja, skipped=True)
+        
+        # Initialize Graphiti if needed
+        if not await self._ensure_graphiti_initialized() or self.graphiti is None:
+            await self._release_delete_lock(chat_id, entity_uuid)
+            error_msg = "Graphitiが利用できないため、削除できません。" if is_ja else "Cannot delete: Graphiti is unavailable."
+            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+        
+        # Set user headers for API calls
+        headers = self._get_user_info_headers(__user__, chat_id)
+        if headers:
+            user_headers_context.set(headers)
+        
+        # NOTE: Confirmation is handled by JavaScript UI (two-click confirmation on the
+        # delete button) before sending this command. We don't use __event_call__ here
+        # because in multi-model scenarios, the model that loses the lock race finishes
+        # first, which can invalidate the __event_call__ for the model that won the lock.
+        
+        # Execute deletion
+        if user_valves.show_status:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": f"削除中: {entity_name}..." if is_ja else f"Deleting: {entity_name}...", "done": False},
+                }
+            )
+        
+        try:
+            # Get user's group_id for authorization
+            group_id = self._get_group_id(__user__) if __user__ else None
+            
+            # First, verify the entity exists and belongs to this user's group
+            try:
+                # Use EntityNode.get_by_uuids() to fetch the entity
+                nodes = await EntityNode.get_by_uuids(self.graphiti.driver, [entity_uuid])
+                
+                if not nodes:
+                    await self._release_delete_lock(chat_id, entity_uuid)
+                    error_msg = f"エンティティが見つかりません: {entity_uuid}" if is_ja else f"Entity not found: {entity_uuid}"
+                    return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+                
+                entity = nodes[0]
+                
+                # Check group_id authorization
+                entity_group_id = getattr(entity, "group_id", None)
+                if group_id and entity_group_id and entity_group_id != group_id:
+                    await self._release_delete_lock(chat_id, entity_uuid)
+                    error_msg = "このエンティティを削除する権限がありません。" if is_ja else "You don't have permission to delete this entity."
+                    return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+                    
+            except Exception as e:
+                await self._release_delete_lock(chat_id, entity_uuid)
+                if self.valves.debug_print:
+                    print(f"Error fetching entity: {e}")
+                error_msg = f"エンティティの確認に失敗しました: {e}" if is_ja else f"Failed to verify entity: {e}"
+                return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+            
+            # Delete the entity using EntityNode.delete_by_uuids()
+            # This also deletes connected edges via Cypher query
+            await EntityNode.delete_by_uuids(self.graphiti.driver, [entity_uuid])
+            
+            if self.valves.debug_print:
+                print(f"Successfully deleted entity: {entity_uuid} ({entity_name})")
+            
+            if user_valves.show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": f"✓ 削除完了: {entity_name}" if is_ja else f"✓ Deleted: {entity_name}", "done": True},
+                    }
+                )
+            
+            success_msg = f"エンティティ「{entity_name}」(UUID: {entity_uuid})を正常に削除しました。" if is_ja else f"Successfully deleted entity \"{entity_name}\" (UUID: {entity_uuid})."
+            return self._build_delete_response_body(body, success_msg, success=True, is_ja=is_ja, entity_name=entity_name)
+            
+        except Exception as e:
+            await self._release_delete_lock(chat_id, entity_uuid)
+            if self.valves.debug_print:
+                print(f"Delete failed: {e}")
+                traceback.print_exc()
+            
+            error_msg = f"削除に失敗しました: {e}" if is_ja else f"Deletion failed: {e}"
+            if user_valves.show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": f"✗ 削除失敗" if is_ja else f"✗ Deletion failed", "done": True},
+                    }
+                )
+            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+    def _build_delete_response_body(
+        self,
+        body: dict,
+        result_message: str,
+        success: bool,
+        is_ja: bool,
+        skipped: bool = False,
+        entity_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Build the response body after a delete command.
+        
+        Keeps the original user message (so skip_save_regex can match it) and
+        appends a system message with instructions for the AI to relay the result.
+        
+        Args:
+            body: Original request body
+            result_message: The result message to include
+            success: Whether the deletion was successful
+            is_ja: Whether Japanese language is preferred
+            skipped: Whether the deletion was skipped (another model handling it)
+            entity_name: Name of the deleted entity (for success message)
+            
+        Returns:
+            Modified body dict with system instruction appended
+        """
+        messages = body.get("messages", [])
+        if not messages:
+            return body
+        
+        # Build instruction for AI as a system message
+        if skipped:
+            if is_ja:
+                instruction = (
+                    "ユーザーが送信した削除コマンドは既に別のモデルが処理中です。"
+                    "以下のメッセージをそのままユーザーに伝えてください。短く簡潔に。\n\n"
+                    f"{result_message}"
+                )
+            else:
+                instruction = (
+                    "The delete command sent by the user is already being processed by another model. "
+                    "Relay the following message to the user. Be brief.\n\n"
+                    f"{result_message}"
+                )
+        elif success:
+            if is_ja:
+                instruction = (
+                    "ユーザーが送信した削除コマンドは正常に処理されました。"
+                    "以下の結果をユーザーに伝えてください。絵文字を使って親しみやすく、でも簡潔に。\n\n"
+                    f"{result_message}"
+                )
+            else:
+                instruction = (
+                    "The delete command sent by the user was processed successfully. "
+                    "Inform the user of the result below. Use emojis to be friendly but keep it brief.\n\n"
+                    f"{result_message}"
+                )
+        else:
+            if is_ja:
+                instruction = (
+                    "ユーザーが送信した削除コマンドでエラーが発生しました。"
+                    "以下の内容をユーザーに伝えてください。\n\n"
+                    f"{result_message}"
+                )
+            else:
+                instruction = (
+                    "An error occurred while processing the delete command sent by the user. "
+                    "Inform the user of the following.\n\n"
+                    f"{result_message}"
+                )
+        
+        # Keep original messages and append a system message with instructions
+        # This preserves the user message so skip_save_regex can still match it
+        new_messages = messages + [
+            {
+                "role": "system",
+                "content": instruction,
+            }
+        ]
+        
+        return {**body, "messages": new_messages}
 
     async def _get_redis_client(self):
         """
@@ -1796,6 +2156,15 @@ body {
   background: #dc2626;
   border-color: #dc2626;
 }
+.action-btn.danger.confirming {
+  background: #f97316;
+  border-color: #f97316;
+  animation: pulse-warning 0.6s ease-in-out infinite alternate;
+}
+@keyframes pulse-warning {
+  from { opacity: 1; }
+  to { opacity: 0.7; }
+}
 .graph-band {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -2116,12 +2485,13 @@ body {
         delete_controls = ""
         if entity_uuid and self.valves.enable_entity_delete_button:
             if is_japanese:
-                delete_tooltip = "このエンティティの削除をAIに依頼します。\n※Graphiti Memory Manage Toolが有効化されている必要があります。"
-                delete_btn_label = "エンティティを削除"
+                delete_tooltip = "このエンティティを削除します。\n2回クリックで実行されます。"
+                delete_btn_label = "削除"
             else:
-                delete_tooltip = "Request AI to delete this entity.\n*Requires Graphiti Memory Manage Tool to be enabled."
-                delete_btn_label = "Delete Entity"
-            delete_controls = f"""<button class=\"action-btn danger\" title=\"{self._escape_html_text(delete_tooltip)}\" data-graphiti-entity-delete=\"{self._escape_html_text(entity_uuid)}\" data-graphiti-entity-name=\"{self._escape_html_text(entity.get('name'))}\">{delete_btn_label}</button>"""
+                delete_tooltip = "Delete this entity.\nClick twice to confirm."
+                delete_btn_label = "Delete"
+            # Note: title attribute supports literal newlines, don't escape the tooltip
+            delete_controls = f"""<button class="action-btn danger" title="{delete_tooltip}" data-graphiti-entity-delete="{self._escape_html_text(entity_uuid)}" data-graphiti-entity-name="{self._escape_html_text(entity.get('name'))}">{delete_btn_label}</button>"""
 
         max_cards = 4
         cards: list[str] = []
@@ -2196,50 +2566,78 @@ body {
         height = 200 if connection_total == 0 else 420
         delete_script = None
         if entity_uuid and self.valves.enable_entity_delete_button:
-            delete_script = """
-(function () {
+            # Localize messages for two-stage confirmation
+            if is_japanese:
+                confirm_label = '本当に削除？'
+                deleting_label = '削除中...'
+                original_label = '削除'
+            else:
+                confirm_label = 'Confirm?'
+                deleting_label = 'Deleting...'
+                original_label = 'Delete'
+            
+            # Two-stage confirmation: first click changes button text, second click executes
+            # Button resets after 3 seconds if not confirmed
+            delete_script = f"""
+(function () {{
   const buttons = document.querySelectorAll('[data-graphiti-entity-delete]');
   if (!buttons || buttons.length === 0) return;
 
-  const sendPrompt = (promptText) => {
+  const sendCommand = (uuid, name) => {{
+    const command = '/graphiti-delete-entity ' + uuid + ' ' + name;
     let targetOrigin = window.location?.origin || '*';
     if (!targetOrigin || targetOrigin === 'null') targetOrigin = '*';
-    try {
-      window.parent?.postMessage({ type: 'input:prompt:submit', text: promptText }, targetOrigin);
-    } catch (err) {
+    try {{
+      window.parent?.postMessage({{ type: 'input:prompt:submit', text: command }}, targetOrigin);
+    }} catch (err) {{
       console.error('Graphiti delete button postMessage failed', err);
-    }
-    // Clear input box after submit so the prompt doesn't linger in the UI.
-    try {
-      window.parent?.postMessage({ type: 'input:prompt', text: '' }, targetOrigin);
-    } catch (err) {
+    }}
+    try {{
+      window.parent?.postMessage({{ type: 'input:prompt', text: '' }}, targetOrigin);
+    }} catch (err) {{
       console.error('Graphiti delete button postMessage failed', err);
-    }
-  };
+    }}
+  }};
 
-  buttons.forEach((btn) => {
+  buttons.forEach((btn) => {{
     if (btn.dataset.graphitiDeleteBound) return;
     btn.dataset.graphitiDeleteBound = 'true';
+    let confirmPending = false;
+    let resetTimer = null;
 
-    btn.addEventListener('click', () => {
+    const resetButton = () => {{
+      confirmPending = false;
+      btn.textContent = '{original_label}';
+      btn.classList.remove('confirming');
+      if (resetTimer) {{
+        clearTimeout(resetTimer);
+        resetTimer = null;
+      }}
+    }};
+
+    btn.addEventListener('click', () => {{
       const uuid = btn.getAttribute('data-graphiti-entity-delete');
       const name = btn.getAttribute('data-graphiti-entity-name') || 'entity';
       if (!uuid) return;
 
-      // Sandboxed iframe cannot show modal dialogs; send prompt immediately.
-      const promptLines = [
-        `Delete the Graphiti entity "${name}" (UUID: ${uuid}).`,
-        'Call the "graphiti_memory_manage.delete_by_uuids" tool with node_uuids set to this UUID. If the tool is unavailable, tell the user to enable Graphiti Memory Manage.',
-        'Proceed without asking for more input; show the built-in confirmation dialog.'
-      ];
-
-      const prompt = promptLines.join(String.fromCharCode(10));
-      btn.disabled = true;
-      btn.textContent = 'Requested…';
-      sendPrompt(prompt);
-    });
-  });
-})();
+      if (!confirmPending) {{
+        // First click: show confirmation state
+        confirmPending = true;
+        btn.textContent = '{confirm_label}';
+        btn.classList.add('confirming');
+        // Reset after 3 seconds
+        resetTimer = setTimeout(resetButton, 3000);
+      }} else {{
+        // Second click: execute deletion
+        if (resetTimer) clearTimeout(resetTimer);
+        btn.disabled = true;
+        btn.textContent = '{deleting_label}';
+        btn.classList.remove('confirming');
+        sendCommand(uuid, name);
+      }}
+    }});
+  }});
+}})();
 """
 
         return self._wrap_rich_html(inner.strip(), min_height=height, extra_body_script=delete_script)
@@ -3030,12 +3428,33 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
         __id__: Optional[str] = None,
+        __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> dict:
         if self.valves.debug_print:
             print(f"inlet:{__name__}")
             print(f"inlet:user:{__user__}")
         
         user_valves: Filter.UserValves = self.UserValves.model_validate((__user__ or {}).get("valves", {}))
+        is_ja = self._is_japanese_preferred(user_valves)
+        
+        # Check for delete command BEFORE any other processing
+        messages = body.get("messages", [])
+        if messages and user_valves.enable_delete_command:
+            last_message = messages[-1]
+            if last_message.get("role") == "user":
+                content = self._get_content_from_message(last_message)
+                if content and content.startswith("/graphiti-delete-entity "):
+                    return await self._handle_delete_command(
+                        body=body,
+                        content=content,
+                        user_valves=user_valves,
+                        is_ja=is_ja,
+                        __event_emitter__=__event_emitter__,
+                        __event_call__=__event_call__,
+                        __user__=__user__,
+                        __metadata__=__metadata__,
+                    )
+        
         # Check if user has disabled the feature
         if __user__:
             if not user_valves.enabled:
@@ -3048,7 +3467,6 @@ window.addEventListener('resize', renderGraph, { passive: true });
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory search.")
             if __user__ and user_valves.show_status:
-                is_ja = self._is_japanese_preferred(user_valves)
                 await __event_emitter__(
                     {
                         "type": "status",
