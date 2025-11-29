@@ -4,8 +4,12 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.3
-requirements: graphiti-core[falkordb]
+version: 0.3.4
+requirements: graphiti-core
+
+Note on FalkorDB backend:
+  FalkorDB requires additional setup due to Redis version conflicts.
+  See the README for details: https://github.com/Skyzi000/open-webui-graphiti-memory#falkordb-alternative-not-recently-tested
 
 Design:
 - Main class: Tools
@@ -50,7 +54,8 @@ from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
-from graphiti_core.driver.falkordb_driver import FalkorDriver
+# Note: FalkorDriver is imported lazily only when FalkorDB backend is selected
+# to avoid requiring the falkordb package when using Neo4j backend
 from graphiti_core.nodes import EntityNode, EpisodicNode, EpisodeType, get_episodic_node_from_record
 from graphiti_core.edges import EntityEdge
 from openai import AsyncOpenAI
@@ -319,6 +324,7 @@ class GraphitiHelper:
         if self.valves.graph_db_backend.lower() == "falkordb":
             if self.valves.debug_print:
                 print("Initializing FalkorDB driver...")
+            from graphiti_core.driver.falkordb_driver import FalkorDriver
             falkor_driver = FalkorDriver(
                 host=self.valves.falkordb_host,
                 port=self.valves.falkordb_port,

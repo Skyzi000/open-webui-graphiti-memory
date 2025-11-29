@@ -98,6 +98,24 @@ docker run -d -p 7687:7687 -p 7474:7474 -e NEO4J_AUTH=neo4j/password -v ./data:/
 
 #### FalkorDB (Alternative, not recently tested)
 
+> **⚠️ Warning: Redis Version Conflict**
+>
+> The `falkordb` package requires `redis<6.0`, which conflicts with Open WebUI's redis dependency (latest version, currently 7.x). If you use Open WebUI's Redis features (e.g., `WEBSOCKET_MANAGER=redis`), this downgrade can cause issues.
+>
+> **If you still want to use FalkorDB:**
+>
+> Install the FalkorDB extra in your environment (recommended - persists across extension updates):
+>
+> ```bash
+> pip install graphiti-core[falkordb]
+> ```
+>
+> Or add it to your Dockerfile based on the Open WebUI image.
+>
+> Alternatively, you can edit the `requirements` line in each extension file to `graphiti-core[falkordb]`, but this must be repeated after every update.
+>
+> **Neo4j backend is recommended** to avoid this conflict.
+
 ```bash
 docker run -d -p 6379:6379 -p 3000:3000 -v ./data:/var/lib/falkordb/data falkordb/falkordb
 ```

@@ -4,8 +4,12 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.15.0
-requirements: graphiti-core[falkordb]
+version: 0.15.1
+requirements: graphiti-core
+
+Note on FalkorDB backend:
+  FalkorDB requires additional setup due to Redis version conflicts.
+  See the README for details: https://github.com/Skyzi000/open-webui-graphiti-memory#falkordb-alternative-not-recently-tested
 
 Design:
 - Main class: Filter
@@ -74,7 +78,8 @@ from graphiti_core.search.search_config import (
     NodeReranker,
     EpisodeReranker,
 )
-from graphiti_core.driver.falkordb_driver import FalkorDriver
+# Note: FalkorDriver is imported lazily only when FalkorDB backend is selected
+# to avoid requiring the falkordb package when using Neo4j backend
 
 # Chats import may fail if running outside Open WebUI core (e.g., raw file import)
 try:
@@ -636,6 +641,7 @@ class Filter:
 
             falkor_driver = None
             if self.valves.graph_db_backend.lower() == "falkordb":
+                from graphiti_core.driver.falkordb_driver import FalkorDriver
                 falkor_driver = FalkorDriver(
                     host=self.valves.falkordb_host,
                     port=self.valves.falkordb_port,

@@ -4,9 +4,13 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.1.2
-requirements: graphiti-core[falkordb]
+version: 0.1.3
+requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
+
+Note on FalkorDB backend:
+  FalkorDB requires additional setup due to Redis version conflicts.
+  See the README for details: https://github.com/Skyzi000/open-webui-graphiti-memory#falkordb-alternative-not-recently-tested
 
 Design:
 - Main class: Action
@@ -45,7 +49,8 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.nodes import EpisodeType
 from openai import AsyncOpenAI
-from graphiti_core.driver.falkordb_driver import FalkorDriver
+# Note: FalkorDriver is imported lazily only when FalkorDB backend is selected
+# to avoid requiring the falkordb package when using Neo4j backend
 
 # Context variable to store user-specific headers for each async request
 user_headers_context = contextvars.ContextVar('user_headers', default={})
@@ -339,6 +344,7 @@ class Action:
 
             falkor_driver = None
             if self.valves.graph_db_backend.lower() == "falkordb":
+                from graphiti_core.driver.falkordb_driver import FalkorDriver
                 falkor_driver = FalkorDriver(
                     host=self.valves.falkordb_host,
                     port=self.valves.falkordb_port,
