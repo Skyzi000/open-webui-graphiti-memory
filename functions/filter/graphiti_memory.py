@@ -463,6 +463,10 @@ class Filter:
             default=r"(?s)Delete the Graphiti entity .*graphiti_memory_manage\.delete_by_uuids",
             description="Regex; if the latest user message matches, outlet will skip saving messages for this turn. Default matches the delete-button prompt. Useful for delete or admin commands. Leave empty to disable.",
         )
+        ui_language: str = Field(
+            default="en",
+            description="Language for UI labels and status messages: 'en' (English) or 'ja' (Japanese)",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -819,6 +823,20 @@ class Filter:
             Redis key string for citation bucket
         """
         return f"{base_prefix}:citations:{chat_id}:{message_id}"
+
+    def _is_japanese_preferred(self, user_valves: "Filter.UserValves") -> bool:
+        """
+        Check if user prefers Japanese language based on UserValves settings.
+        
+        Args:
+            user_valves: UserValves object with ui_language setting
+            
+        Returns:
+            True if user prefers Japanese (ja), False otherwise (default: English)
+        """
+        if hasattr(user_valves, 'ui_language'):
+            return user_valves.ui_language.lower() == 'ja'
+        return False
 
     def _get_group_id(self, user: dict) -> Optional[str]:
         """
@@ -1251,6 +1269,7 @@ class Filter:
         entity_lookup: dict[str, dict[str, str]],
         use_rich_html: bool = True,
         include_parameters: bool = False,
+        is_japanese: bool = False,
     ) -> Optional[dict]:
         """Convert a Graphiti fact result into a citation payload for Open WebUI."""
         fact_text = getattr(result, "fact", None)
@@ -1297,12 +1316,14 @@ class Filter:
                 valid_until=valid_until,
                 idx=idx,
                 total=total,
+                is_japanese=is_japanese,
             )
             metadata["html"] = graph_html
             document_content = graph_html
         else:
             emoji = "🔚" if valid_until else "🔛"
-            document_content = f"{emoji} Fact {idx}/{total}: {fact_text}"
+            label = "ファクト" if is_japanese else "Fact"
+            document_content = f"{emoji} {label} {idx}/{total}: {fact_text}"
 
         return {
             "source": {
@@ -1323,6 +1344,7 @@ class Filter:
         entity_connections: dict[str, list[dict[str, Any]]],
         use_rich_html: bool = True,
         include_parameters: bool = False,
+        is_japanese: bool = False,
     ) -> Optional[dict]:
         """Convert a Graphiti entity result into a citation payload for Open WebUI."""
         name = getattr(result, "name", None)
@@ -1362,11 +1384,13 @@ class Filter:
                 connections=connections,
                 idx=idx,
                 total=total,
+                is_japanese=is_japanese,
             )
             metadata["html"] = graph_html
             document_content = graph_html
         else:
-            document_content = f"👤 Entity {idx}/{total}: {name} - {summary}"
+            label = "エンティティ" if is_japanese else "Entity"
+            document_content = f"👤 {label} {idx}/{total}: {name} - {summary}"
 
         return {
             "source": {
@@ -1955,14 +1979,17 @@ body {
         valid_until: Any,
         idx: int,
         total: int,
+        is_japanese: bool = False,
     ) -> str:
-        relation_text = relation_name or "Fact"
+        relation_text = relation_name or ("ファクト" if is_japanese else "Fact")
         relation_html = self._escape_html_text(relation_text)
-        position_html = self._escape_html_text(f"Fact {idx}/{total}")
+        fact_label = "ファクト" if is_japanese else "Fact"
+        position_html = self._escape_html_text(f"{fact_label} {idx}/{total}")
 
         # Build title: SOURCE → RELATION → TARGET
-        source_name = source_entity.get("name", "Unknown")
-        target_name = target_entity.get("name", "Unknown")
+        unknown_label = "不明" if is_japanese else "Unknown"
+        source_name = source_entity.get("name", unknown_label)
+        target_name = target_entity.get("name", unknown_label)
         title_text = f"{source_name} → {relation_text} → {target_name}"
         title_html = self._escape_html_text(title_text)
 
@@ -1970,18 +1997,22 @@ body {
         target_summary = self._format_text_block(target_entity.get("summary", ""), 200)
         fact_html = self._format_text_block(fact_text, 420) or ""
 
+        no_summary_text = "要約が保存されていません" if is_japanese else "No summary stored."
         source_block = (
             f"<p class=\"node-summary\">{source_summary}</p>"
             if source_summary
-            else "<p class=\"node-summary muted\">No summary stored.</p>"
+            else f"<p class=\"node-summary muted\">{no_summary_text}</p>"
         )
         target_block = (
             f"<p class=\"node-summary\">{target_summary}</p>"
             if target_summary
-            else "<p class=\"node-summary muted\">No summary stored.</p>"
+            else f"<p class=\"node-summary muted\">{no_summary_text}</p>"
         )
         range_text = self._format_valid_range(valid_from, valid_until)
         range_html = f"<div class=\"edge-range\">{self._escape_html_text(range_text)}</div>" if range_text else ""
+
+        source_label = "ソース" if is_japanese else "Source"
+        target_label = "ターゲット" if is_japanese else "Target"
 
         inner = f"""
 <div class="graphiti-card fact-card">
@@ -1991,7 +2022,7 @@ body {
   </div>
   <div class="graph-band">
     <div class="node">
-      <div class="node-label">Source</div>
+      <div class="node-label">{source_label}</div>
       <div class="node-title">{self._escape_html_text(source_entity.get('name'))}</div>
       {source_block}
     </div>
@@ -2001,7 +2032,7 @@ body {
       {range_html}
     </div>
     <div class="node">
-      <div class="node-label">Target</div>
+      <div class="node-label">{target_label}</div>
       <div class="node-title">{self._escape_html_text(target_entity.get('name'))}</div>
       {target_block}
     </div>
@@ -2018,38 +2049,46 @@ body {
         connections: list[dict[str, Any]],
         idx: int,
         total: int,
+        is_japanese: bool = False,
     ) -> str:
         title_html = self._escape_html_text(entity.get("name"))
         summary_html = self._format_text_block(entity.get("summary", ""), 360)
+        no_summary_text = "要約が保存されていません" if is_japanese else "No summary stored."
         summary_block = (
             f"<p class=\"node-summary\">{summary_html}</p>"
             if summary_html
-            else "<p class=\"node-summary muted\">No summary stored.</p>"
+            else f"<p class=\"node-summary muted\">{no_summary_text}</p>"
         )
         connection_total = len(connections)
-        connection_label = "0 related facts" if connection_total == 0 else (
-            f"{connection_total} related fact{'s' if connection_total != 1 else ''}"
-        )
+        if is_japanese:
+            connection_label = f"{connection_total}件の関連ファクト"
+        else:
+            connection_label = "0 related facts" if connection_total == 0 else (
+                f"{connection_total} related fact{'s' if connection_total != 1 else ''}"
+            )
 
         entity_uuid = entity.get("uuid")
         delete_controls = ""
         if entity_uuid and self.valves.enable_entity_delete_button:
-            delete_controls = f"""
-  <div class=\"action-row\">
-    <span class=\"action-hint\">Deletes this entity and linked facts after confirmation.</span>
-    <button class=\"action-btn danger\" data-graphiti-entity-delete=\"{self._escape_html_text(entity_uuid)}\" data-graphiti-entity-name=\"{self._escape_html_text(entity.get('name'))}\">Delete Entity</button>
-  </div>
-"""
+            if is_japanese:
+                delete_tooltip = "このエンティティの削除をAIに依頼します。\n※Graphiti Memory Manage Toolが有効化されている必要があります。"
+                delete_btn_label = "エンティティを削除"
+            else:
+                delete_tooltip = "Request AI to delete this entity.\n*Requires Graphiti Memory Manage Tool to be enabled."
+                delete_btn_label = "Delete Entity"
+            delete_controls = f"""<button class=\"action-btn danger\" title=\"{self._escape_html_text(delete_tooltip)}\" data-graphiti-entity-delete=\"{self._escape_html_text(entity_uuid)}\" data-graphiti-entity-name=\"{self._escape_html_text(entity.get('name'))}\">{delete_btn_label}</button>"""
 
         max_cards = 4
         cards: list[str] = []
+        unknown_entity_label = "不明なエンティティ" if is_japanese else "Unknown Entity"
+        default_fact_label = "ファクト" if is_japanese else "Fact"
         for conn in connections[:max_cards]:
             direction = conn.get("direction", "out")
             arrow = "->" if direction == "out" else "<-"
-            relation_html = self._escape_html_text(conn.get("relation") or "Fact")
+            relation_html = self._escape_html_text(conn.get("relation") or default_fact_label)
             fact_block = self._format_text_block(conn.get("fact", ""), 260)
             other = conn.get("other") or {}
-            other_name = self._escape_html_text(other.get("name", "Unknown Entity"))
+            other_name = self._escape_html_text(other.get("name", unknown_entity_label))
             other_summary = self._format_text_block(other.get("summary", ""), 180)
             other_summary_block = (
                 f"<p class=\"node-summary\">{other_summary}</p>"
@@ -2076,24 +2115,35 @@ body {
             connections_html = "<div class=\"connection-grid\">" + "".join(cards) + "</div>"
             if connection_total > max_cards:
                 remaining = connection_total - max_cards
-                more_label = f"+{remaining} more connection{'s' if remaining != 1 else ''} in Graphiti"
+                if is_japanese:
+                    more_label = f"+{remaining}件の接続がGraphitiにあります"
+                else:
+                    more_label = f"+{remaining} more connection{'s' if remaining != 1 else ''} in Graphiti"
                 connections_html += f"<div class=\"more-note\">{self._escape_html_text(more_label)}</div>"
         else:
-            connections_html = "<div class=\"empty-state\">No related facts were returned for this entity in the current search window.</div>"
+            connections_html = ""
+
+        entity_label = "エンティティ" if is_japanese else "Entity"
+        summary_label = "要約" if is_japanese else "Summary"
+
+        # Build action row with connection count and optional delete button
+        action_row_items = [f"<span class=\"chip chip-muted\">{self._escape_html_text(connection_label)}</span>"]
+        if delete_controls:
+            action_row_items.append(delete_controls.strip())
+        action_row = f"<div class=\"action-row\">{''.join(action_row_items)}</div>"
 
         inner = f"""
 <div class="graphiti-card entity-card">
   <div class="card-heading">
-    <span class="chip">Entity {idx}/{total}</span>
+    <span class="chip">{entity_label} {idx}/{total}</span>
     <span class="title">{title_html}</span>
-    <span class="chip chip-muted">{self._escape_html_text(connection_label)}</span>
   </div>
-  {delete_controls}
   <div class="node">
-    <div class="node-label">Summary</div>
+    <div class="node-label">{summary_label}</div>
     <div class="node-title">{title_html}</div>
     {summary_block}
   </div>
+  {action_row}
   {connections_html}
 </div>
 """
@@ -2238,36 +2288,58 @@ body {
         self,
         nodes_payload: list[dict[str, Any]],
         links_payload: list[dict[str, Any]],
+        is_japanese: bool = False,
     ) -> str:
         if not nodes_payload:
+            empty_text = "グラフの概要がありません。" if is_japanese else "No graph overview available."
             return self._wrap_rich_html(
-                "<div class=\"graphiti-card\"><div class=\"empty-state\">No graph overview available.</div></div>",
+                f"<div class=\"graphiti-card\"><div class=\"empty-state\">{empty_text}</div></div>",
                 min_height=200,
             )
 
         node_count = len(nodes_payload)
         edge_count = len(links_payload)
-        chip_text = f"{node_count} entit{'ies' if node_count != 1 else 'y'} · {edge_count} fact{'s' if edge_count != 1 else ''}"
-        legend_html = """
+        injected_count = sum(1 for node in nodes_payload if node.get("kind") == "spotlight")
+        if is_japanese:
+            entity_word = "エンティティ"
+            fact_word = "ファクト"
+            chip_text = f"{node_count}件の{entity_word}（内{injected_count}件が注入済み） · {edge_count}件の{fact_word}"
+        else:
+            chip_text = f"{node_count} entit{'ies' if node_count != 1 else 'y'} ({injected_count} injected) · {edge_count} fact{'s' if edge_count != 1 else ''}"
+        
+        if is_japanese:
+            injected_label = "注入済みエンティティ"
+            injected_tooltip = "AIに直接渡されたエンティティ（検索結果として返され、コンテキストに注入されたもの）"
+            related_label = "関連エンティティ"
+            related_tooltip = "注入されたファクトのソース/ターゲットであるエンティティ（エンティティ自体は注入されていない）"
+        else:
+            injected_label = "Injected Entities"
+            injected_tooltip = "Entities directly passed to AI (returned from search and injected into context)"
+            related_label = "Related Entities"
+            related_tooltip = "Entities that are source/target of injected facts (the entities themselves are not injected)"
+        legend_html = f"""
 <div class="legend">
-  <span class="legend-item"><span class="legend-dot legend-spotlight"></span> Spotlight Entities</span>
-  <span class="legend-item"><span class="legend-dot legend-context"></span> Connected Entities</span>
+  <span class="legend-item" title="{self._escape_html_text(injected_tooltip)}"><span class="legend-dot legend-spotlight"></span> {injected_label}</span>
+  <span class="legend-item" title="{self._escape_html_text(related_tooltip)}"><span class="legend-dot legend-context"></span> {related_label}</span>
 </div>
 """
 
+        overview_label = "概要" if is_japanese else "Overview"
+        title_text = "取得したメモリグラフ" if is_japanese else "Retrieved Memory Graph"
+        note_text = "この検索で返されたエンティティとファクトのインタラクティブなスナップショット。" if is_japanese else "Interactive snapshot of the entities and facts returned in this search."
         inner = f"""
 <div class="graphiti-card overview-card">
   <div class="card-heading">
-    <span class="chip">Overview</span>
-    <span class="title">Retrieved Memory Graph</span>
+    <span class="chip">{overview_label}</span>
+    <span class="title">{title_text}</span>
     <span class="chip chip-muted">{self._escape_html_text(chip_text)}</span>
   </div>
   {legend_html}
   <div id="graph-container" class="graph-canvas" style="height: 350px;">
-    <svg id="graph-svg" role="img" aria-label="Graph overview"></svg>
+    <svg id="graph-svg" role="img" aria-label="{title_text}"></svg>
     <div id="graph-tooltip" class="graph-tooltip hidden"></div>
   </div>
-  <div class="more-note">Interactive snapshot of the entities and facts returned in this search.</div>
+  <div class="more-note">{note_text}</div>
 </div>
 """
 
@@ -2791,6 +2863,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         entity_lookup: dict[str, dict[str, str]],
         nodes: list[Any] | None,
         edges: list[Any] | None,
+        is_japanese: bool = False,
     ) -> Optional[dict]:
         nodes_payload, links_payload = self._build_overview_graph_data(
             entity_lookup,
@@ -2800,7 +2873,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         if not nodes_payload:
             return None
 
-        overview_html = self._render_overview_graph_html(nodes_payload, links_payload)
+        overview_html = self._render_overview_graph_html(nodes_payload, links_payload, is_japanese=is_japanese)
         source_id = self.valves.citation_source_id or "graphiti-memory"
         source_name = self.valves.citation_source_name or "Graphiti Memory"
         metadata: dict[str, Any] = {
@@ -2909,10 +2982,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
             print(f"inlet:{__name__}")
             print(f"inlet:user:{__user__}")
         
-        user_valves: Filter.UserValves = self.UserValves()
+        user_valves: Filter.UserValves = self.UserValves.model_validate((__user__ or {}).get("valves", {}))
         # Check if user has disabled the feature
         if __user__:
-            user_valves = __user__.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
@@ -2923,10 +2995,11 @@ window.addEventListener('resize', renderGraph, { passive: true });
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory search.")
             if __user__ and user_valves.show_status:
+                is_ja = self._is_japanese_preferred(user_valves)
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "Memory service unavailable", "done": True},
+                        "data": {"description": "Graphitiが利用できません" if is_ja else "Graphiti unavailable", "done": True},
                     }
                 )
             return body
@@ -2998,11 +3071,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
             print(f"Using search strategy: {self.valves.search_strategy}")
         
         if user_valves.show_status:
+            is_ja = self._is_japanese_preferred(user_valves)
             preview = sanitized_query[:100] + "..." if len(sanitized_query) > 100 else sanitized_query
+            status_text = f"🔍 Graphiti検索中: {preview}" if is_ja else f"🔍 Searching Graphiti: {preview}"
             await __event_emitter__(
                 {
                     "type": "status",
-                    "data": {"description": f"🔍 Searching Graphiti: {preview}", "done": False},
+                    "data": {"description": status_text, "done": False},
                 }
             )
         
@@ -3037,22 +3112,25 @@ window.addEventListener('resize', renderGraph, { passive: true });
         except Exception as e:
             search_duration = time.time() - search_start_time
             error_msg = str(e)
+            is_ja = self._is_japanese_preferred(user_valves)
             if "Syntax error" in error_msg or "RediSearch" in error_msg:
                 print(f"FalkorDB/RediSearch syntax error during search (after {search_duration:.2f}s): {error_msg}")
                 if user_valves.show_status:
+                    status_text = f"メモリ検索が利用できません (構文エラー, {search_duration:.2f}秒)" if is_ja else f"Memory search unavailable (syntax error, {search_duration:.2f}s)"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": f"Memory search unavailable (syntax error, {search_duration:.2f}s)", "done": True},
+                            "data": {"description": status_text, "done": True},
                         }
                     )
             else:
                 print(f"Unexpected error during Graphiti search (after {search_duration:.2f}s): {e}")
                 if user_valves.show_status:
+                    status_text = f"メモリ検索に失敗しました ({search_duration:.2f}秒)" if is_ja else f"Memory search failed ({search_duration:.2f}s)"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": f"Memory search failed ({search_duration:.2f}s)", "done": True},
+                            "data": {"description": status_text, "done": True},
                         }
                     )
             return body
@@ -3060,10 +3138,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Check if any results were found
         if len(results.edges) == 0 and len(results.nodes) == 0:
             if user_valves.show_status:
+                is_ja = self._is_japanese_preferred(user_valves)
+                status_text = f"関連するメモリが見つかりませんでした ({search_duration:.2f}秒)" if is_ja else f"No relevant memories found ({search_duration:.2f}s)"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"No relevant memories found ({search_duration:.2f}s)", "done": True},
+                        "data": {"description": status_text, "done": True},
                     }
                 )
             return body
@@ -3083,6 +3163,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 entity_lookup=entity_lookup,
                 nodes=results.nodes,
                 edges=results.edges,
+                is_japanese=self._is_japanese_preferred(user_valves),
             )
             if overview_citation:
                 await self._queue_citation_event(
@@ -3116,6 +3197,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         entity_lookup,
                         use_rich_html=user_valves.rich_html_citations,
                         include_parameters=user_valves.show_citation_parameters,
+                        is_japanese=self._is_japanese_preferred(user_valves),
                     )
                     if fact_citation:
                         await self._queue_citation_event(
@@ -3154,6 +3236,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             entity_connections,
                             use_rich_html=user_valves.rich_html_citations,
                             include_parameters=user_valves.show_citation_parameters,
+                            is_japanese=self._is_japanese_preferred(user_valves),
                         )
                         if entity_citation:
                             await self._queue_citation_event(
@@ -3231,14 +3314,24 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 body['messages'].append(memory_message)
             
             if user_valves.show_status:
+                is_ja = self._is_japanese_preferred(user_valves)
                 # Build status message showing what was found
                 status_parts = []
                 if len(facts) > 0:
-                    status_parts.append(f"{len(facts)} fact{'s' if len(facts) != 1 else ''}")
+                    if is_ja:
+                        status_parts.append(f"{len(facts)}件のファクト")
+                    else:
+                        status_parts.append(f"{len(facts)} fact{'s' if len(facts) != 1 else ''}")
                 if len(entities) > 0:
-                    status_parts.append(f"{len(entities)} entit{'ies' if len(entities) != 1 else 'y'}")
+                    if is_ja:
+                        status_parts.append(f"{len(entities)}件のエンティティ")
+                    else:
+                        status_parts.append(f"{len(entities)} entit{'ies' if len(entities) != 1 else 'y'}")
                 
-                status_msg = "🧠 " + " and ".join(status_parts) + f" found ({search_duration:.2f}s)"
+                if is_ja:
+                    status_msg = "🧠 " + "と".join(status_parts) + f"が見つかりました ({search_duration:.2f}秒)"
+                else:
+                    status_msg = "🧠 " + " and ".join(status_parts) + f" found ({search_duration:.2f}s)"
                 
                 await __event_emitter__(
                     {
@@ -3260,9 +3353,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
         await self._flush_pending_citations(__event_emitter__, __metadata__, __id__)
         filter_id_for_prefix = __id__ or "graphiti_memory"
 
+        user_valves: Filter.UserValves = self.UserValves.model_validate((__user__ or {}).get("valves", {}))
         # Check if user has disabled the feature
         if __user__:
-            user_valves: Filter.UserValves = __user__.get("valves", self.UserValves())
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
@@ -3290,8 +3383,6 @@ window.addEventListener('resize', renderGraph, { passive: true });
             if self.valves.debug_print:
                 print(f"Set user headers in context: {list(headers.keys())}")
 
-
-        user_valves: Filter.UserValves = __user__.get("valves", self.UserValves())
         messages = body.get("messages", [])
         if len(messages) == 0:
             return body
@@ -3393,10 +3484,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
         episode_body = separator.join(episode_parts)
         
         if user_valves.show_status:
+            is_ja = self._is_japanese_preferred(user_valves)
+            adding_msg = "✍️ 会話をGraphitiメモリに追加中..." if is_ja else "✍️ Adding conversation to Graphiti memory..."
             await __event_emitter__(
                 {
                     "type": "status",
-                    "data": {"description": f"✍️ Adding conversation to Graphiti memory...", "done": False},
+                    "data": {"description": adding_msg, "done": False},
                 }
             )
         
@@ -3439,10 +3532,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             if self.valves.debug_print:
                                 print(f"Redis dedup hit: {dedup_key_str}")
                             if user_valves.show_status:
+                                is_ja = self._is_japanese_preferred(user_valves)
+                                skip_msg = "⏭️ 重複エピソードをスキップしました（処理済み）" if is_ja else "⏭️ Skipped duplicate episode (already processed)"
                                 await __event_emitter__(
                                     {
                                         "type": "status",
-                                        "data": {"description": f"⏭️ Skipped duplicate episode (already processed)", "done": True},
+                                        "data": {"description": skip_msg, "done": True},
                                     }
                                 )
                             return body
@@ -3462,10 +3557,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             print(f"Skipping duplicate episode (memory): chat_id={chat_id}, hash={episode_hash[:16]}...")
                         # Skip processing for this duplicate episode
                         if user_valves.show_status:
+                            is_ja = self._is_japanese_preferred(user_valves)
+                            skip_msg = "⏭️ 重複エピソードをスキップしました（処理済み）" if is_ja else "⏭️ Skipped duplicate episode (already processed)"
                             await __event_emitter__(
                                 {
                                     "type": "status",
-                                    "data": {"description": f"⏭️ Skipped duplicate episode (already processed)", "done": True},
+                                    "data": {"description": skip_msg, "done": True},
                                 }
                             )
                         return body
@@ -3549,14 +3646,16 @@ window.addEventListener('resize', renderGraph, { passive: true });
 
             # Display extracted entities and facts in status
             if user_valves.show_status and add_results:
+                is_ja = self._is_japanese_preferred(user_valves)
                 # Show all Facts
                 if add_results.edges:
                     for idx, edge in enumerate(add_results.edges, 1):
                         emoji = "🔚" if edge.invalid_at else "🔛"
+                        label = "ファクト" if is_ja else "Fact"
                         await __event_emitter__(
                             {
                                 "type": "status",
-                                "data": {"description": f"{emoji} Fact {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
+                                "data": {"description": f"{emoji} {label} {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
                             }
                         )
                 
@@ -3567,45 +3666,50 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         entity_display = f"{node.name}"
                         if hasattr(node, 'summary') and node.summary:
                             entity_display += f" - {node.summary}"
+                        label = "エンティティ" if is_ja else "Entity"
                         await __event_emitter__(
                             {
                                 "type": "status",
-                                "data": {"description": f"👤 Entity {idx}/{len(add_results.nodes)}: {entity_display}", "done": False},
+                                "data": {"description": f"👤 {label} {idx}/{len(add_results.nodes)}: {entity_display}", "done": False},
                             }
                         )
         except asyncio.TimeoutError:
             print(f"Timeout adding conversation to Graphiti memory after {self.valves.add_episode_timeout}s")
             if user_valves.show_status:
+                is_ja = self._is_japanese_preferred(user_valves)
+                status_text = "警告: メモリ保存がタイムアウトしました" if is_ja else "Warning: Memory save timed out"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"Warning: Memory save timed out", "done": False},
+                        "data": {"description": status_text, "done": False},
                     }
                 )
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
+            is_ja = self._is_japanese_preferred(user_valves)
             
             # Provide more specific error messages for common issues
             if "ValidationError" in error_type:
                 print(f"Graphiti LLM response validation error for conversation: {error_msg}")
-                user_msg = "Graphiti: LLM response format error (will retry on next message)"
+                user_msg = "Graphiti: LLMレスポンス形式エラー (次のメッセージで再試行します)" if is_ja else "Graphiti: LLM response format error (will retry on next message)"
             elif "ConnectionError" in error_type or "timeout" in error_msg.lower():
                 print(f"Graphiti connection error adding conversation: {error_msg}")
-                user_msg = "Graphiti: Connection error (temporary)"
+                user_msg = "Graphiti: 接続エラー (一時的)" if is_ja else "Graphiti: Connection error (temporary)"
             else:
                 print(f"Graphiti error adding conversation: {e}")
-                user_msg = f"Graphiti: Memory save failed ({error_type})"
+                user_msg = f"Graphiti: メモリ保存に失敗しました ({error_type})" if is_ja else f"Graphiti: Memory save failed ({error_type})"
             
             # Only print full traceback for unexpected errors
             if "ValidationError" not in error_type:
                 traceback.print_exc()
             
             if user_valves.show_status:
+                warning_label = "警告" if is_ja else "Warning"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"Warning: {user_msg}", "done": False},
+                        "data": {"description": f"{warning_label}: {user_msg}", "done": False},
                     }
                 )
         finally:
@@ -3627,19 +3731,32 @@ window.addEventListener('resize', renderGraph, { passive: true });
             pass  # Successfully saved messages
 
         if user_valves.show_status:
+            is_ja = self._is_japanese_preferred(user_valves)
             if saved_count == 0:
-                status_msg = "❌ Failed to save conversation to Graphiti memory"
+                status_msg = "❌ 会話をGraphitiメモリに保存できませんでした" if is_ja else "❌ Failed to save conversation to Graphiti memory"
             else:
                 # Build detailed status message with entity and relationship counts
-                status_parts = ["✅ Added conversation to Graphiti memory"]
+                if is_ja:
+                    status_parts = ["✅ 会話をGraphitiメモリに追加しました"]
+                else:
+                    status_parts = ["✅ Added conversation to Graphiti memory"]
                 if add_results:
                     detail_parts = []
                     if add_results.nodes:
-                        detail_parts.append(f"{len(add_results.nodes)} entit{'ies' if len(add_results.nodes) != 1 else 'y'}")
+                        if is_ja:
+                            detail_parts.append(f"{len(add_results.nodes)}件のエンティティ")
+                        else:
+                            detail_parts.append(f"{len(add_results.nodes)} entit{'ies' if len(add_results.nodes) != 1 else 'y'}")
                     if add_results.edges:
-                        detail_parts.append(f"{len(add_results.edges)} relation{'s' if len(add_results.edges) != 1 else ''}")
+                        if is_ja:
+                            detail_parts.append(f"{len(add_results.edges)}件のファクト")
+                        else:
+                            detail_parts.append(f"{len(add_results.edges)} fact{'s' if len(add_results.edges) != 1 else ''}")
                     if detail_parts:
-                        status_msg = " - ".join(status_parts + [" and ".join(detail_parts) + " extracted"])
+                        if is_ja:
+                            status_msg = status_parts[0] + " - " + "と".join(detail_parts) + "を抽出"
+                        else:
+                            status_msg = " - ".join(status_parts + [" and ".join(detail_parts) + " extracted"])
                     else:
                         status_msg = status_parts[0]
                 else:
