@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.14.0
+version: 0.15.0
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -57,6 +57,7 @@ from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.nodes import EpisodeType, EntityNode
 from openai import AsyncOpenAI
+from redis.asyncio import Redis
 from graphiti_core.search.search_config_recipes import (
     COMBINED_HYBRID_SEARCH_RRF,
     COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
@@ -354,24 +355,32 @@ class Filter:
             default=1000,
             description="Maximum number of episode deduplication entries to keep in memory. When this limit is reached, oldest entries will be removed. Default is 1000.",
         )
-        dedup_use_redis: bool = Field(
+        use_redis: bool = Field(
             default=(
                 os.environ.get("WEBSOCKET_MANAGER", "").lower() == "redis"
             ),
             description=(
-                "Use Redis for episode deduplication. Defaults to True when WEBSOCKET_MANAGER=redis. "
-                "When enabled but Redis is unreachable, automatically falls back to in-memory dedup."
+                "Enable Redis for distributed features (episode dedup, citations). "
+                "Automatically defaults to True when Open WebUI is configured with WEBSOCKET_MANAGER=redis. "
+                "RECOMMENDED: Keep default settings to automatically use Open WebUI's Redis configuration. "
+                "Falls back to in-memory if Redis unavailable."
             ),
         )
-        redis_dedup_url: str = Field(
+        redis_url: str = Field(
             default=os.environ.get("REDIS_URL", ""),
-            description="Redis URL for episode deduplication (only used when dedup_use_redis is True). Defaults to env REDIS_URL.",
+            description=(
+                "Redis connection URL for distributed features (episode dedup, citations). "
+                "RECOMMENDED: Keep empty to automatically use Open WebUI's REDIS_URL environment variable. "
+                "Only set manually if you want to use a different Redis instance."
+            ),
         )
-        redis_dedup_key_prefix: str = Field(
+        redis_key_prefix: str = Field(
             default="",
             description=(
-                "Key prefix for Redis-based episode deduplication. "
-                "If empty, defaults to 'owui:{filter_id}:episode_dedup' to avoid collisions when multiple copies are installed."
+                "Base prefix for all Redis keys. Each feature appends its own suffix. "
+                "RECOMMENDED: Keep empty to auto-generate 'owui:{filter_id}' as base prefix. "
+                "Examples with redis_key_prefix='myapp': "
+                "'myapp:episode_dedup:{chat_id}:{hash}', 'myapp:citations:{chat_id}:{msg_id}'."
             ),
         )
         chat_title_cache_limit: int = Field(
@@ -465,9 +474,9 @@ class Filter:
         # Episode deduplication tracking: {(chat_id, episode_hash): timestamp}
         self._processed_episodes: dict[tuple[str, str], float] = {}
         self._episodes_lock = asyncio.Lock()
-        # Redis client for global dedup (lazy init)
-        self._redis_dedup = None
-        self._redis_dedup_lock = asyncio.Lock()
+        # Redis client for distributed features (lazy init)
+        self._redis_client: Redis | None = None
+        self._redis_lock = asyncio.Lock()
         # Cache chat titles fetched from Open WebUI Chats model to reduce DB hits (bounded LRU)
         self._chat_title_cache: OrderedDict[str, str] = OrderedDict()
         # Defer Graphiti initialization until inlet()/outlet() needs it
@@ -768,34 +777,48 @@ class Filter:
             keep_count = self.valves.episode_dedup_max_entries
             self._processed_episodes = dict(sorted_items[-keep_count:])
 
-    async def _get_redis_dedup_client(self):
+    async def _get_redis_client(self):
         """
-        Lazily get an asyncio Redis client for dedup; returns None on failure.
+        Lazily get an asyncio Redis client for distributed features; returns None on failure.
         """
-        if self._redis_dedup:
-            return self._redis_dedup
-        async with self._redis_dedup_lock:
-            if self._redis_dedup:
-                return self._redis_dedup
-            if not self.valves.redis_dedup_url:
+        if self._redis_client:
+            return self._redis_client
+        async with self._redis_lock:
+            if self._redis_client:
+                return self._redis_client
+            if not self.valves.redis_url:
                 return None
             try:
                 from redis import asyncio as aioredis  # Lazy import to avoid hard dependency
 
-                self._redis_dedup = aioredis.from_url(
-                    self.valves.redis_dedup_url,
+                self._redis_client = aioredis.from_url(
+                    self.valves.redis_url,
                     decode_responses=False,
                 )
                 # Optional ping to verify connectivity
-                await self._redis_dedup.ping()
+                await self._redis_client.ping()
                 if self.valves.debug_print:
-                    print("Redis dedup client initialized")
-                return self._redis_dedup
+                    print("Redis client initialized for distributed features")
+                return self._redis_client
             except Exception as e:
                 if self.valves.debug_print:
-                    print(f"Redis dedup unavailable, falling back to memory: {e}")
-                self._redis_dedup = None
+                    print(f"Redis unavailable, falling back to in-memory: {e}")
+                self._redis_client = None
                 return None
+
+    def _get_redis_citation_key(self, chat_id: str, message_id: str, base_prefix: str) -> str:
+        """
+        Generate Redis key for citation bucket storage.
+
+        Args:
+            chat_id: Chat identifier
+            message_id: Message identifier
+            base_prefix: Base key prefix (without feature suffix)
+
+        Returns:
+            Redis key string for citation bucket
+        """
+        return f"{base_prefix}:citations:{chat_id}:{message_id}"
 
     def _get_group_id(self, user: dict) -> Optional[str]:
         """
@@ -1094,10 +1117,12 @@ class Filter:
         self,
         event_payload: dict,
         __metadata__: Optional[dict],
+        filter_id: Optional[str] = None,
     ) -> bool:
         """
         Store a citation event until outlet() flushes it so we don't conflict with
         web-search citations that arrive later.
+        Supports Redis for multi-worker environments with in-memory fallback.
         """
         key = self._get_citation_bucket_key(__metadata__)
         if key is None:
@@ -1106,6 +1131,40 @@ class Filter:
             return False
 
         now = time.time()
+        chat_id, message_id = key
+
+        # Try Redis first if enabled
+        if self.valves.use_redis and self.valves.redis_url:
+            redis_client = await self._get_redis_client()
+            if redis_client:
+                try:
+                    import json
+
+                    # Generate Redis key with filter-specific prefix
+                    filter_id_for_prefix = filter_id or "graphiti_memory"
+                    base_prefix = (
+                        self.valves.redis_key_prefix
+                        or f"owui:{filter_id_for_prefix}"
+                    )
+                    redis_key = self._get_redis_citation_key(chat_id, message_id, base_prefix)
+
+                    # Atomically append event to LIST
+                    await redis_client.rpush(redis_key, json.dumps(event_payload)) # pyright: ignore[reportGeneralTypeIssues]
+
+                    # Set TTL on first write (EXPIRE is idempotent)
+                    ttl = int(self.valves.citation_retention_seconds or 0)
+                    if ttl > 0:
+                        await redis_client.expire(redis_key, ttl)
+
+                    if self.valves.debug_print:
+                        print(f"Citation queued to Redis: {redis_key}")
+                    return True
+                except Exception as e:
+                    if self.valves.debug_print:
+                        print(f"Failed to queue citation to Redis, falling back to memory: {e}")
+                    # Fall through to in-memory
+
+        # In-memory fallback
         async with self._pending_citations_lock:
             self._cleanup_expired_citations_locked(now)
             bucket = self._pending_citations.get(key)
@@ -1119,22 +1178,65 @@ class Filter:
         self,
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __metadata__: Optional[dict],
+        filter_id: Optional[str] = None,
     ) -> None:
         """
         Emit and clear any citation events queued for the current response.
+        Checks both Redis and in-memory storage to handle fallback cases.
         """
         key = self._get_citation_bucket_key(__metadata__)
         if key is None:
             return
 
+        chat_id, message_id = key
+        redis_bucket = []
+        memory_bucket = None
+
+        # Try to get from Redis first if enabled
+        if self.valves.use_redis and self.valves.redis_url:
+            redis_client = await self._get_redis_client()
+            if redis_client:
+                try:
+                    import json
+
+                    # Generate Redis key with filter-specific prefix
+                    filter_id_for_prefix = filter_id or "graphiti_memory"
+                    base_prefix = (
+                        self.valves.redis_key_prefix
+                        or f"owui:{filter_id_for_prefix}"
+                    )
+                    redis_key = self._get_redis_citation_key(chat_id, message_id, base_prefix)
+
+                    # Atomically pop all items from LIST
+                    items_bytes = []
+                    while True:
+                        item = await redis_client.lpop(redis_key) # pyright: ignore[reportGeneralTypeIssues]
+                        if not item:
+                            break
+                        items_bytes.append(item)
+
+                    if items_bytes:
+                        redis_bucket = [json.loads(item.decode()) for item in items_bytes]
+                        if self.valves.debug_print:
+                            print(f"Flushed {len(redis_bucket)} citations from Redis: {redis_key}")
+                except Exception as e:
+                    if self.valves.debug_print:
+                        print(f"Failed to flush citations from Redis: {e}")
+
+        # Also check in-memory (for fallback cases)
         async with self._pending_citations_lock:
-            bucket = self._pending_citations.pop(key, None)
+            memory_bucket = self._pending_citations.pop(key, None)
             self._cleanup_expired_citations_locked()
 
-        if not bucket:
-            return
+        # Merge citations from both sources
+        all_items = []
+        if redis_bucket:
+            all_items.extend(redis_bucket)
+        if memory_bucket:
+            all_items.extend(memory_bucket.get("items", []))
 
-        for event_payload in bucket.get("items", []):
+        # Emit all citations
+        for event_payload in all_items:
             try:
                 await __event_emitter__(event_payload)
             except Exception as e:
@@ -2801,6 +2903,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
+        __id__: Optional[str] = None,
     ) -> dict:
         if self.valves.debug_print:
             print(f"inlet:{__name__}")
@@ -2988,6 +3091,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         "data": overview_citation,
                     },
                     __metadata__,
+                    __id__,
                 )
         
         # Process EntityEdge results (relations/facts) only if enabled
@@ -3020,6 +3124,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                                 "data": fact_citation,
                             },
                             __metadata__,
+                            __id__,
                         )
                 
                 if self.valves.debug_print:
@@ -3057,6 +3162,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                                     "data": entity_citation,
                                 },
                                 __metadata__,
+                                __id__,
                             )
                 
                 if self.valves.debug_print:
@@ -3151,7 +3257,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __id__: Optional[str] = None,
     ) -> dict:
         # Flush any pending citations immediately so they show up before long-running work
-        await self._flush_pending_citations(__event_emitter__, __metadata__)
+        await self._flush_pending_citations(__event_emitter__, __metadata__, __id__)
         filter_id_for_prefix = __id__ or "graphiti_memory"
 
         # Check if user has disabled the feature
@@ -3310,17 +3416,17 @@ window.addEventListener('resize', renderGraph, { passive: true });
             # but won't block when assistant responses differ (e.g., save_assistant_response=True)
             episode_hash = hashlib.sha256(episode_body.encode()).hexdigest()
             use_redis = (
-                self.valves.dedup_use_redis
-                and bool(self.valves.redis_dedup_url)
+                self.valves.use_redis
+                and bool(self.valves.redis_url)
             )
 
             if use_redis:
-                prefix = (
-                    self.valves.redis_dedup_key_prefix
-                    or f"owui:{filter_id_for_prefix}:episode_dedup"
+                base_prefix = (
+                    self.valves.redis_key_prefix
+                    or f"owui:{filter_id_for_prefix}"
                 )
-                dedup_key_str = f"{prefix}:{chat_id}:{episode_hash}"
-                redis_client = await self._get_redis_dedup_client()
+                dedup_key_str = f"{base_prefix}:episode_dedup:{chat_id}:{episode_hash}"
+                redis_client = await self._get_redis_client()
                 if redis_client:
                     try:
                         set_ok = await redis_client.set(
@@ -3507,7 +3613,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
             if user_valves.episode_dedup_enabled and episode_dedup_added and saved_count == 0 and episode_key:
                 if isinstance(episode_key, str):
                     try:
-                        redis_client = await self._get_redis_dedup_client()
+                        redis_client = await self._get_redis_client()
                         if redis_client:
                             await redis_client.delete(episode_key)
                     except Exception:
