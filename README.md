@@ -12,6 +12,8 @@ This extension provides **temporal knowledge graph-based memory** for Open WebUI
 - **Transparent Integration**: Memory is automatically searched and injected into LLM context, and new information is automatically extracted and saved after each turn
 - **Knowledge Graph Structure**: Entities, relationships, and episodes are extracted and interconnected
 - **Multi-User Isolation**: Each user has their own isolated memory space
+- **Rich Citations**: Interactive HTML citation cards with graph visualizations
+- **Distributed Support**: Redis integration for multi-instance deployments
 - **Flexible Deployment**: Choose between integrated Filter or standalone Pipeline based on your needs
 
 ## Components
@@ -20,7 +22,7 @@ This extension provides **temporal knowledge graph-based memory** for Open WebUI
 
 **Location**: `functions/filter/graphiti_memory.py`
 
-The Filter version runs inside OpenWebUI server for simple deployments:
+The Filter version runs inside Open WebUI server for simple deployments:
 
 1. **Before LLM Processing**: Automatically searches for relevant memories based on the current conversation
 2. **Context Injection**: Injects retrieved memories into the LLM's context
@@ -33,6 +35,9 @@ The Filter version runs inside OpenWebUI server for simple deployments:
 - Configurable search strategies (Fast/Balanced/Quality)
 - Per-user memory isolation
 - Optional automatic saving of user/assistant messages
+- Rich HTML citations with interactive graph visualizations
+- Episode deduplication to prevent duplicate saves in concurrent scenarios
+- Redis support for distributed deployments
 
 ### 🔘 Action: Add Graphiti Memory
 
@@ -150,6 +155,22 @@ Note: The 'quality' strategy may have compatibility issues in the current versio
   - **Warning**: Email/name may be changed, which would change the group_id. Use `{user_id}` for stable isolation.
   - Set to `'none'` for shared memory space
 
+#### Redis Settings (Optional)
+
+For distributed deployments with multiple Open WebUI instances:
+
+- `use_redis`: Enable Redis for distributed features (episode dedup, citations). Automatically enabled when Open WebUI is configured with `WEBSOCKET_MANAGER=redis`
+- `redis_url`: Redis connection URL. Uses Open WebUI's `REDIS_URL` environment variable by default
+- `redis_key_prefix`: Custom prefix for Redis keys
+
+#### Advanced Settings
+
+- `semaphore_limit`: Maximum concurrent LLM operations (default: 10). Adjust based on your LLM provider's rate limits
+- `add_episode_timeout`: Timeout in seconds for adding episodes (default: 240)
+- `max_search_message_length`: Maximum length of user message for Graphiti search (default: 5000)
+- `memory_message_role`: Role for injected memory messages (`'system'` or `'user'`)
+- `enable_entity_delete_button`: Show delete button in entity citation cards (experimental)
+
 ### User Valves
 
 Users can customize their experience:
@@ -160,6 +181,9 @@ Users can customize their experience:
 
 - `enabled`: Enable/disable automatic memory
 - `show_status`: Show status messages during memory operations
+- `show_citation`: Emit retrieval results as citation events (affects fact/entity previews)
+- `rich_html_citations`: Render citation results as rich HTML with interactive graph visualizations
+- `show_citation_parameters`: Include detailed metadata parameters in citation events
 - `save_user_message`: Auto-save user messages as episodes
 - `save_assistant_response`: Auto-save the latest assistant response as episodes
 - `save_previous_assistant_message`: Auto-save the assistant message before the user's message
@@ -167,10 +191,19 @@ Users can customize their experience:
 - `allowed_rag_source_types`: Comma-separated list of retrieval source types to merge (e.g., `'file,text'`)
 - `inject_facts`: Inject relationship facts from memory search results
 - `inject_entities`: Inject entity summaries from memory search results
+- `search_history_turns`: Number of recent user/assistant messages to include in search query
+- `episode_dedup_enabled`: Enable duplicate episode detection for concurrent scenarios
+- `skip_save_regex`: Regex pattern to skip saving certain messages (e.g., admin commands)
+
+**Action:**
+
+- `show_status`: Show status messages during save operations
+- `save_user_message`: Save user messages when action is triggered
+- `save_assistant_response`: Save assistant responses when action is triggered
 
 **Tools:**
 
-- `message_language`: UI language (`'en'` or `'ja'`)
+- `message_language`: UI language for confirmation dialogs (`'en'` or `'ja'`)
 
 ## Optional: Pipeline Hosting
 
