@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.15.1
+version: 0.15.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -465,8 +465,8 @@ class Filter:
             description="Enable duplicate episode detection. When enabled, prevents duplicate episodes (identified by chat_id and episode content hash) from being saved when multiple models respond simultaneously. Automatically allows different assistant responses when save_assistant_response is enabled.",
         )
         skip_save_regex: str = Field(
-            default=r"(?s)Delete the Graphiti entity .*graphiti_memory_manage\.delete_by_uuids",
-            description="Regex; if the latest user message matches, outlet will skip saving messages for this turn. Default matches the delete-button prompt. Useful for delete or admin commands. Leave empty to disable.",
+            default=r"(?s)^Delete the Graphiti entity .*graphiti_memory_manage\.delete_by_uuids",
+            description="Regex; if the latest user message matches, the entire turn (user message and current assistant response) is skipped. Additionally, in the next turn, the previous_assistant (which was the response to the matched message) is also skipped to prevent saving command responses. Default matches messages starting with the delete-button prompt. Useful for delete or admin commands. Leave empty to disable.",
         )
         ui_language: str = Field(
             default="en",
@@ -2961,10 +2961,18 @@ window.addEventListener('resize', renderGraph, { passive: true });
         return sanitized
 
     @staticmethod
-    def _should_skip_save(latest_user_content: str | None, pattern: str | None) -> bool:
+    def _should_skip_save(content: str | None, pattern: str | None) -> bool:
         """
-        Return True if the latest user content matches the provided regex pattern.
+        Return True if the content matches the provided regex pattern.
+        Used to filter out messages that should not be saved to memory.
         Empty pattern disables skipping.
+        
+        Args:
+            content: Message content to check
+            pattern: Regex pattern to match against
+            
+        Returns:
+            True if content matches pattern and should be skipped, False otherwise
         """
         if not pattern:
             return False
@@ -2972,9 +2980,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
             regex = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
         except re.error:
             return False
-        if latest_user_content is None:
+        if content is None:
             return False
-        return bool(regex.search(latest_user_content))
+        return bool(regex.search(content))
 
     async def inlet(
         self,
@@ -3396,10 +3404,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Determine which messages to save based on settings
         messages_to_save = []
         
-        # Find the last user message, last assistant message, and previous assistant message
+        # Find the last user message, last assistant message, previous assistant message,
+        # and the user message before previous_assistant (to check if it was a skip-worthy command)
         last_user_message = None
         last_assistant_message = None
         previous_assistant_message = None
+        user_before_previous_assistant = None
         
         for msg in reversed(messages):
             if msg.get("role") == "user" and last_user_message is None:
@@ -3413,13 +3423,48 @@ window.addEventListener('resize', renderGraph, { passive: true });
                     # This is before the last user message (the assistant message user is responding to)
                     if previous_assistant_message is None:
                         previous_assistant_message = msg
-                        break  # We found everything we need
+                        # Continue to find the user message before this assistant
+            elif msg.get("role") == "user" and last_user_message is not None and previous_assistant_message is not None:
+                # This is the user message that triggered the previous_assistant response
+                user_before_previous_assistant = msg
+                break  # We found everything we need
+        
+        # Get skip_save_regex pattern once for reuse
+        skip_pattern = getattr(user_valves, "skip_save_regex", "")
+        
+        # Check if user message matches skip pattern - if so, skip the ENTIRE turn
+        # This ensures that both the user's command and the assistant's response are not saved
+        # (e.g., deletion requests and their confirmations)
+        latest_user_content = self._get_content_from_message(last_user_message) if last_user_message else None
+        if self._should_skip_save(latest_user_content, skip_pattern):
+            if self.valves.debug_print:
+                print("Skipping entire turn due to skip_save_regex match on user message.")
+            if user_valves.show_status:
+                is_ja = self._is_japanese_preferred(user_valves)
+                if is_ja:
+                    skip_msg = "⏭️ このターンの保存をスキップしました (skip_save_regex)"
+                else:
+                    skip_msg = "⏭️ Skipped saving this turn (skip_save_regex)"
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": skip_msg, "done": True},
+                    }
+                )
+            return body
         
         # Build messages_to_save list based on UserValves settings
         if user_valves.save_previous_assistant_message and previous_assistant_message:
-            previous_assistant_content = self._get_content_from_message(previous_assistant_message)
-            if previous_assistant_content:
-                messages_to_save.append(("previous_assistant", previous_assistant_content))
+            # Check if the user message that triggered this assistant response was a skip-worthy command
+            # If so, don't save this assistant response either (it's contextually linked)
+            user_before_content = self._get_content_from_message(user_before_previous_assistant) if user_before_previous_assistant else None
+            if self._should_skip_save(user_before_content, skip_pattern):
+                if self.valves.debug_print:
+                    print("Skipping previous_assistant because its triggering user message matched skip_save_regex.")
+            else:
+                previous_assistant_content = self._get_content_from_message(previous_assistant_message)
+                if previous_assistant_content:
+                    messages_to_save.append(("previous_assistant", previous_assistant_content))
         
         user_content_block = ""
         if user_valves.save_user_message and last_user_message:
@@ -3451,20 +3496,6 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 messages_to_save.append(("assistant", assistant_content))
         
         if len(messages_to_save) == 0:
-            return body
-
-        # Skip saving when the latest user message matches skip_save_regex
-        latest_user_content = self._get_content_from_message(last_user_message) if last_user_message else None
-        if self._should_skip_save(latest_user_content, getattr(user_valves, "skip_save_regex", "")):
-            if self.valves.debug_print:
-                print("Skipping save for this turn due to skip_save_regex match.")
-            if user_valves.show_status:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": "⏭️ Memory save skipped for this turn (skip_save_regex matched).", "done": True},
-                    }
-                )
             return body
         
         # Construct episode body in "Assistant: {message}\nUser: {message}\nAssistant: {message}" format for EpisodeType.message
