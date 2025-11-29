@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.15.2
+version: 0.15.3
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -302,8 +302,8 @@ class Filter:
         )
         
         max_search_message_length: int = Field(
-            default=5000,
-            description="Maximum length of user message to send to Graphiti search. Messages longer than this will be truncated (keeping first and last parts, dropping middle). Set to 0 to disable truncation. Note: This should be set to a size that the embedding model can handle to avoid errors.",
+            default=512,
+            description="Maximum total length of the search query sent to Graphiti (includes recent user/assistant messages based on search_history_turns). When exceeded, the oldest message in the query is truncated (keeping first and last parts). Set to 0 to disable. Note: Large values may cause TooManyNestedClauses errors in Lucene or RediSearch query parsing errors. Previously set to 5000 (with margin for ~8000 token embedding model limits), but reduced to avoid search engine errors. If you encounter such errors, try reducing further (e.g., 256).",
         )
         
         sanitize_search_query: bool = Field(
@@ -457,7 +457,7 @@ class Filter:
             description="Inject entities (EntityNode summaries) from memory search results.",
         )
         search_history_turns: int = Field(
-            default=1,
+            default=3,
             description="How many of the most recent user/assistant messages to include in the Graphiti search query. 1 uses only the latest user message, 2 also appends the assistant reply before it, 3 adds the previous user turn, and so on. Values <= 0 include as many alternating user/assistant messages as possible, still respecting the max_search_message_length limit. Messages from other roles are ignored.",
         )
         episode_dedup_enabled: bool = Field(
@@ -941,6 +941,32 @@ class Filter:
         # Handle string format
         return content if isinstance(content, str) else ""
     
+    def _truncate_text_middle(self, text: str, max_length: int) -> str:
+        """
+        Truncate text by keeping first and last parts, removing the middle.
+        
+        Args:
+            text: Text to truncate
+            max_length: Maximum allowed length
+            
+        Returns:
+            Truncated text with middle removed if needed
+        """
+        if max_length <= 0 or len(text) <= max_length:
+            return text
+        
+        # Need at least some characters for ellipsis
+        if max_length < 10:
+            return text[:max_length]
+        
+        ellipsis = "..."
+        available = max_length - len(ellipsis)
+        # Split evenly between start and end
+        first_half = available // 2
+        second_half = available - first_half
+        
+        return text[:first_half] + ellipsis + text[-second_half:]
+    
     def _build_search_history_query(
         self,
         messages: list[dict],
@@ -953,7 +979,8 @@ class Filter:
         Args:
             messages: Full conversation message list.
             history_turns: Number of user/assistant messages to include. Values <= 0 include all.
-            max_chars: Character budget used to stop collecting additional turns (<=0 disables).
+            max_chars: Character budget. When exceeded, the oldest message being added is truncated
+                       (keeping first and last parts) to fit within the budget.
         
         Returns:
             String formatted as alternating "User：..." / "Assistant：..." blocks, or None if no user turn found.
@@ -991,17 +1018,29 @@ class Filter:
                 continue
             
             role_label = "User" if role == "user" else "Assistant"
-            segment = f"{role_label}：{text}"
+            prefix = f"{role_label}："
+            segment = f"{prefix}{text}"
             
-            addition = len(segment) if not collected else len(separator) + len(segment)
+            sep_cost = 0 if not collected else len(separator)
+            addition = sep_cost + len(segment)
+            
+            # Check if we would exceed the character limit
+            if char_limit is not None and total_chars + addition > char_limit:
+                # Calculate remaining budget for this segment
+                remaining = char_limit - total_chars - sep_cost - len(prefix)
+                if remaining > 10:  # Only add if we have meaningful space left
+                    truncated_text = self._truncate_text_middle(text, remaining)
+                    segment = f"{prefix}{truncated_text}"
+                    collected.append(segment)
+                    turns_collected += 1
+                # Either way, we've hit the limit - stop here
+                break
+            
             collected.append(segment)
             turns_collected += 1
             total_chars += addition
             
             if turn_limit is not None and turns_collected >= turn_limit:
-                break
-            
-            if char_limit is not None and total_chars >= char_limit:
                 break
         
         if not collected:
