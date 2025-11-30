@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.4
+version: 0.4.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -1348,6 +1348,266 @@ class Tools:
 
         except Exception as e:
             error_msg = f"❌ Error retrieving episode content: {str(e)}"
+            if self.valves.debug_print:
+                traceback.print_exc()
+            return error_msg
+
+    async def delete_episodes_by_time_range(
+        self,
+        start_time: str,
+        end_time: str,
+        time_field: str = "created_at",
+        __user__: dict = {},
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+        __event_call__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Delete episodes within a specified time range after user confirmation.
+
+        This tool deletes episodes whose timestamp falls within the specified time range.
+
+        IMPORTANT NOTES FOR AI:
+        - You MUST ask the user for specific date/time values, unless you have access to
+          accurate current time information (e.g., from system prompts or time tools).
+          Do NOT attempt to guess or calculate relative times without a reliable time source.
+        - Example user request: "Delete episodes created between 2024-01-01 and 2024-01-31"
+
+        - Time format: ISO 8601 strings with timezone offset
+        - ⚠️ CRITICAL: Understand timezone offsets correctly!
+
+          ❌ WRONG: "2024-01-01T00:00:00+09:00" is NOT midnight UTC!
+                    It means midnight in JST (= 2023-12-31 15:00 UTC)
+
+          ✅ Examples:
+          - "2024-01-01T00:00:00Z" = Jan 1 midnight UTC
+          - "2024-01-01T00:00:00+09:00" = Jan 1 midnight JST (= Dec 31 15:00 UTC)
+          - "2024-01-01T09:00:00+09:00" = Jan 1 9AM JST (= Jan 1 00:00 UTC)
+
+        - Prefer using the user's local timezone if known (e.g., +09:00 for Japan)
+          This makes times more intuitive for users
+        - Range is start-inclusive, end-exclusive: [start_time, end_time)
+
+        :param start_time: Start of time range (ISO 8601 format with timezone). Episodes with timestamp >= this will be included.
+                           Examples: "2024-01-01T00:00:00Z", "2024-01-01T09:00:00+09:00"
+        :param end_time: End of time range (ISO 8601 format with timezone). Episodes with timestamp < this will be included.
+                         Examples: "2024-02-01T00:00:00Z", "2024-02-01T09:00:00+09:00"
+        :param time_field: (Optional) Timestamp field to filter by: "created_at" (default) or "valid_at".
+                           Usually not needed - only specify if explicitly required for special cases.
+                           Do NOT ask users about this parameter unless they specifically mention it.
+        :return: Result message with deletion status
+
+        Example:
+        - delete_episodes_by_time_range(start_time="2024-01-01T00:00:00Z", end_time="2024-02-01T00:00:00Z")
+          → Deletes all episodes created in January 2024
+        """
+
+        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
+            return "❌ Error: Memory service is not available"
+
+        # Set user headers in context variable (before any API calls)
+        headers = self._get_user_info_headers(__user__, None)
+        if headers:
+            user_headers_context.set(headers)
+            if self.valves.debug_print:
+                print(f"Set user headers in context: {list(headers.keys())}")
+
+        try:
+            # 1. Parameter Validation
+            # Validate time_field
+            if time_field not in ["created_at", "valid_at"]:
+                return f"❌ Error: time_field must be 'created_at' or 'valid_at'. Got: '{time_field}'"
+
+            # Parse ISO 8601 strings to datetime
+            try:
+                # Replace 'Z' with '+00:00' for ISO format compatibility
+                start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            except ValueError as e:
+                return (
+                    f"❌ Error: Invalid time format. Please use ISO 8601 format.\n"
+                    f"Examples: '2024-01-01T00:00:00Z', '2024-01-01T00:00:00+00:00'\n"
+                    f"Error details: {str(e)}"
+                )
+
+            # Ensure timezone-aware (assume UTC if missing)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+
+            # Validate range
+            if start_dt >= end_dt:
+                return (
+                    f"❌ Error: start_time must be before end_time.\n"
+                    f"start_time: {start_time}\n"
+                    f"end_time: {end_time}"
+                )
+
+            # 2. Fetch and Filter Episodes
+            # Get group_id
+            group_id = self.helper.get_group_id(__user__)
+            if not group_id:
+                return "❌ Error: Group ID is required. Please check your group_id_format configuration."
+
+            if self.valves.debug_print:
+                print(f"=== delete_episodes_by_time_range: Fetching episodes ===")
+                print(f"Group ID: {group_id}")
+                print(f"Time range: {start_time} to {end_time}")
+                print(f"Time field: {time_field}")
+
+            # Fetch all episodes for user's group
+            episodes = await EpisodicNode.get_by_group_ids(
+                self.helper.graphiti.driver,
+                [group_id]
+            )
+
+            if self.valves.debug_print:
+                print(f"Total episodes for group: {len(episodes)}")
+
+            # Filter by time range [start_time, end_time)
+            matched_episodes = []
+            for ep in episodes:
+                ep_time = getattr(ep, time_field, None)
+                if ep_time is None:
+                    continue
+
+                # Ensure episode time is timezone-aware
+                if ep_time.tzinfo is None:
+                    ep_time = ep_time.replace(tzinfo=timezone.utc)
+
+                if start_dt <= ep_time < end_dt:
+                    matched_episodes.append(ep)
+
+            if self.valves.debug_print:
+                print(f"Matched episodes in time range: {len(matched_episodes)}")
+
+            # Handle no matches
+            if not matched_episodes:
+                return f"ℹ️ No episodes found in time range {start_time} to {end_time} (filtered by {time_field})"
+
+            # 3. Confirmation Dialog
+            # Get user language preference
+            is_japanese = self.helper.is_japanese_preferred(__user__)
+
+            # Calculate statistics for summary
+            # Normalize timezones to avoid comparison errors with legacy data
+            ep_times = []
+            for ep in matched_episodes:
+                ep_time = getattr(ep, time_field, None)
+                if ep_time is not None:
+                    # Ensure timezone-aware (normalize to UTC if naive)
+                    if ep_time.tzinfo is None:
+                        ep_time = ep_time.replace(tzinfo=timezone.utc)
+                    ep_times.append(ep_time)
+            oldest_time = min(ep_times) if ep_times else None
+            newest_time = max(ep_times) if ep_times else None
+
+            # Get display timezone from user's input (start_time timezone)
+            # This makes the dialog display times in the same timezone the user specified
+            display_tz = start_dt.tzinfo
+
+            # Convert times to display timezone for consistency
+            if oldest_time and display_tz:
+                oldest_time_display = oldest_time.astimezone(display_tz)
+            else:
+                oldest_time_display = oldest_time
+
+            if newest_time and display_tz:
+                newest_time_display = newest_time.astimezone(display_tz)
+            else:
+                newest_time_display = newest_time
+
+            # Build preview items with summary header (limit to first 5 for display)
+            preview_items = []
+
+            # Add summary header
+            if is_japanese:
+                summary = f"📊 削除対象: {len(matched_episodes)}件"
+                if oldest_time_display and newest_time_display:
+                    summary += f"  \n最古: {oldest_time_display}  \n最新: {newest_time_display}"
+                summary += "  \n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                preview_items.append(summary)
+            else:
+                summary = f"📊 Target: {len(matched_episodes)} episodes"
+                if oldest_time_display and newest_time_display:
+                    summary += f"  \nOldest: {oldest_time_display}  \nNewest: {newest_time_display}"
+                summary += "  \n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                preview_items.append(summary)
+
+            # Add episode previews (first 3 only, compact format)
+            for i, ep in enumerate(matched_episodes[:3], 1):
+                source_description = getattr(ep, 'source_description', '')
+                name = getattr(ep, 'name', 'Unknown')
+                ep_time = getattr(ep, time_field, None)
+
+                # Convert episode time to display timezone
+                if ep_time is not None and display_tz:
+                    # Ensure timezone-aware
+                    if ep_time.tzinfo is None:
+                        ep_time = ep_time.replace(tzinfo=timezone.utc)
+                    ep_time_display = ep_time.astimezone(display_tz)
+                else:
+                    ep_time_display = ep_time if ep_time is not None else 'unknown'
+
+                # Use source_description if available, otherwise fall back to name
+                display_label = source_description if source_description else name
+
+                # Compact one-line format: [i] label (timestamp)
+                preview_text = f"[{i}] {display_label} ({ep_time_display})"
+                preview_items.append(preview_text)
+
+            if len(matched_episodes) > 3:
+                remaining = len(matched_episodes) - 3
+                if is_japanese:
+                    preview_items.append(f"... 他 {remaining}件")
+                else:
+                    preview_items.append(f"... and {remaining} more")
+
+            # Show confirmation dialog
+            if is_japanese:
+                title = f"時間範囲指定エピソード削除の確認 ({len(matched_episodes)}件)"
+                warning = (
+                    f"⚠️ {start_time} から {end_time} の間（{time_field}基準）のエピソードを削除します。\n"
+                    f"この操作は取り消すことができません。関連するエンティティと関係性も削除されます。"
+                )
+            else:
+                title = f"Confirm Time-Range Episode Deletion ({len(matched_episodes)} items)"
+                warning = (
+                    f"⚠️ Deleting episodes from {start_time} to {end_time} (based on {time_field}).\n"
+                    f"This operation cannot be undone. Related entities and relationships will also be deleted."
+                )
+
+            confirmed, error_msg = await self.helper.show_confirmation_dialog(
+                title=title,
+                items=preview_items,
+                warning_message=warning,
+                timeout=self.valves.confirmation_timeout,
+                __user__=__user__,
+                __event_call__=__event_call__,
+            )
+
+            if not confirmed:
+                return error_msg
+
+            # 4. Execute Deletion
+            # Extract UUIDs
+            episode_uuids = [ep.uuid for ep in matched_episodes]
+
+            if self.valves.debug_print:
+                print(f"Deleting {len(episode_uuids)} episodes")
+
+            # Delete using existing helper
+            deleted_count = await self.helper.delete_episodes_by_uuids(episode_uuids)
+
+            # Build result message
+            result = f"✅ Deleted {deleted_count} episodes\n"
+            result += f"Time range: {start_time} to {end_time}\n"
+            result += f"Filter field: {time_field}"
+
+            return result
+
+        except Exception as e:
+            error_msg = f"❌ Error deleting episodes by time range: {str(e)}"
             if self.valves.debug_print:
                 traceback.print_exc()
             return error_msg
