@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.16.0
+version: 0.16.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -46,7 +46,7 @@ import os
 import re
 import time
 import traceback
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable, Any
 from urllib.parse import quote
@@ -388,10 +388,6 @@ class Filter:
                 "'myapp:episode_dedup:{chat_id}:{hash}', 'myapp:citations:{chat_id}:{msg_id}'."
             ),
         )
-        chat_title_cache_limit: int = Field(
-            default=500,
-            description="Maximum number of chat titles to keep in the in-memory LRU cache when resolving source_description. Older entries are evicted when the limit is exceeded.",
-        )
         enable_entity_delete_button: bool = Field(
             default=False,
             description=(
@@ -488,8 +484,6 @@ class Filter:
         # Redis client for distributed features (lazy init)
         self._redis_client: Redis | None = None
         self._redis_lock = asyncio.Lock()
-        # Cache chat titles fetched from Open WebUI Chats model to reduce DB hits (bounded LRU)
-        self._chat_title_cache: OrderedDict[str, str] = OrderedDict()
         # Delete request deduplication: {(chat_id, entity_uuid): timestamp}
         # Ensures only one model executes the delete when multiple models run simultaneously
         self._processed_deletes: dict[tuple[str, str], float] = {}
@@ -1488,7 +1482,7 @@ class Filter:
 
     def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
         """
-        Resolve chat title from Open WebUI Chats model with simple caching.
+        Resolve chat title from Open WebUI Chats model.
         Falls back to None on errors or when chat_id is missing/unknown.
         """
 
@@ -1498,23 +1492,8 @@ class Filter:
         if not chat_id or chat_id == "unknown":
             return None
 
-        cached = self._chat_title_cache.get(chat_id)
-        if cached is not None:
-            # Refresh LRU position
-            self._chat_title_cache.move_to_end(chat_id)
-            return cached
-
         try:
-            title = Chats.get_chat_title_by_id(str(chat_id))
-            if title:
-                self._chat_title_cache[chat_id] = title
-                self._chat_title_cache.move_to_end(chat_id)
-
-                # Enforce LRU size using current valve value (defaults to 500)
-                cache_limit = int(self.valves.chat_title_cache_limit or 0) or 500
-                if cache_limit > 0 and len(self._chat_title_cache) > cache_limit:
-                    self._chat_title_cache.popitem(last=False)
-            return title
+            return Chats.get_chat_title_by_id(str(chat_id))
         except Exception:
             return None
 
