@@ -61,6 +61,7 @@ AI-callable tools for memory management.
 
 **Features:**
 
+- **Migration**: Migrate Open WebUI's built-in memories to Graphiti knowledge graph
 - **Precise Search**: Search for specific Entities, Facts (relationships), or Episodes separately
 - **Confirmation Dialogs**: Well-designed confirmation dialogs before deletion operations
 - **Safe Deletion**: Search and delete specific memories with preview
@@ -72,6 +73,27 @@ AI-callable tools for memory management.
 - **Entities**: People, places, concepts with summaries
 - **Facts (Edges)**: Relationships between entities with temporal validity
 - **Episodes**: Conversation history and source documents
+
+#### Built-in Memory Migration
+
+The `migrate_builtin_memories` tool migrates your existing Open WebUI built-in memories to the Graphiti knowledge graph.
+
+**How to use:**
+
+1. Ask the AI: "Migrate my built-in memories to Graphiti" or "ビルトインメモリをGraphitiに移行して"
+2. The AI will show a confirmation dialog with migration details
+3. Confirm to proceed with the migration
+
+**Migration features:**
+
+- **Idempotent**: Safe to run multiple times - already migrated memories are skipped
+- **Chronological order**: Memories are migrated from oldest to newest
+- **Timestamp preservation**: Original creation time is preserved in UTC
+- **Progress display**: Shows real-time progress with extracted entities and facts
+- **Graceful interruption**: Can be stopped anytime; already migrated memories are preserved
+- **Dry-run mode**: Preview what would be migrated without making changes
+
+**Note**: Built-in memories are NOT automatically deleted after migration. You can manually delete them from Open WebUI's Settings → Personalization → Memory if needed.
 
 ## Requirements
 
@@ -222,6 +244,7 @@ Users can customize their experience:
 **Tools:**
 
 - `message_language`: UI language for confirmation dialogs (`'en'` or `'ja'`)
+- `show_extracted_details`: Show extracted entities and facts in status after adding memory or during migration (default: `true`)
 
 ## Optional: Pipeline Hosting
 
