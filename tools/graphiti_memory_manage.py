@@ -740,234 +740,237 @@ class Tools:
             headers['X-OpenWebUI-Chat-Id'] = str(chat_id)
         
         return headers
-    
-    async def add_memory(
-        self,
-        name: str,
-        content: str,
-        source: str = "text",
-        source_description: str = "",
-        __user__: dict = {},
-        __event_emitter__: Optional[Callable[[dict], Any]] = None,
-    ) -> str:
-        """
-        Add a new memory episode to the knowledge graph.
-        
-        This tool creates a new episode and automatically extracts entities and relationships.
-        The episode is processed to identify key information and integrate it into the knowledge graph.
-        
-        :param name: Name/title of the episode (e.g., "Meeting with client", "Product launch announcement")
-        :param content: The content to store as memory. Can be text, conversation, or JSON data.
-        :param source: Type of source content. Options are:
-                      - "text": Plain text content (default) - Most reliable option
-                      - "message": Conversation-style content in "speaker: content" format.
-                                   REQUIRED FORMAT: Each line must be "speaker_name: message_content"
-                                   The speaker name will be automatically extracted as an entity.
-                                   Example: "user: Hello" or "assistant: How can I help?"
-                      - "json": Structured JSON data (must be valid JSON string)
-                                ⚠️ WARNING: Experimental feature with known compatibility issues.
-                                May fail with ValidationError depending on the LLM endpoint configuration.
-                                If you encounter errors, use "text" source type instead (works with JSON content too).
-        :param source_description: Description of where this memory came from (e.g., "team meeting notes", "customer email")
-        :return: Result message with episode details
-        
-        Examples:
-        - add_memory(name="Client Meeting", content="Discussed Q1 targets with John", source="text", source_description="meeting notes")
-        - add_memory(name="Customer Chat", content="user: What's the return policy?\nassistant: 30-day returns", source="message", source_description="support chat")
-        - add_memory(name="Product Data", content='{"product": "Widget X", "price": 99.99}', source="json", source_description="inventory system")
-        
-        Important Notes:
-        - For source="message": Content MUST follow "speaker: content" format for each line
-        - For source="json": Content must be a valid JSON string (will be validated)
-        
-        Note: __user__ and __event_emitter__ are automatically injected by the system.
-        """
-        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
-            return "❌ Error: Memory service is not available"
-        
-        
-        # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
-        
-        source_type = None  # Initialize for error handling scope
-        
-        try:
-            # Validate source type
-            source_lower = source.lower()
-            if source_lower == "text":
-                source_type = EpisodeType.text
-            elif source_lower == "message":
-                source_type = EpisodeType.message
-                # Validate message format using helper method
-                is_valid, error_msg = GraphitiHelper.validate_message_format(content)
-                if not is_valid:
-                    return error_msg if error_msg else "❌ Error: Invalid message format"
-            elif source_lower == "json":
-                source_type = EpisodeType.json
-                # Validate JSON format
-                try:
-                    json.loads(content)
-                except json.JSONDecodeError as e:
-                    return f"❌ Error: Invalid JSON content: {str(e)}\nPlease ensure the content is a valid JSON string."
-            else:
-                return f"❌ Error: Invalid source type '{source}'. Must be 'text', 'message', or 'json'"
-            
-            # Get user's group_id
-            group_id = self.helper.get_group_id(__user__)
-            if not group_id:
-                return "❌ Error: Group ID is required. Please check your group_id_format configuration."
-            
-            if self.valves.debug_print:
-                print(f"=== add_memory: Adding episode ===")
-                print(f"Name: {name}")
-                print(f"Source: {source_type}")
-                print(f"Group ID: {group_id}")
-                print(f"Content length: {len(content)} chars")
-            
-            # Add episode using Graphiti's add_episode method
-            result = await self.helper.graphiti.add_episode(
-                name=name,
-                episode_body=content,
-                source=source_type,
-                source_description=source_description,
-                reference_time=datetime.now(timezone.utc),
-                group_id=group_id,
-            )
-            
-            if self.valves.debug_print:
-                print(f"=== Episode added successfully ===")
-                print(f"Episode UUID: {result.episode.uuid}")
-                print(f"Extracted {len(result.nodes)} entities")
-                print(f"Extracted {len(result.edges)} relationships")
-            
-            # Get user's language and display preferences
-            user_valves = self.UserValves.model_validate(
-                (__user__ or {}).get("valves", {})
-            )
-            is_ja = user_valves.message_language == "ja"
 
-            # Display extracted entities and facts in status (if enabled)
-            if __event_emitter__ and result and user_valves.show_extracted_details:
-                # Show extracted facts
-                if result.edges:
-                    for edge_idx, edge in enumerate(result.edges, 1):
-                        emoji = "🔚" if edge.invalid_at else "🔛"
-                        label = "ファクト" if is_ja else "Fact"
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {
-                                "description": f"{emoji} {label} {edge_idx}/{len(result.edges)}: {edge.fact}",
-                                "done": False
-                            }
-                        })
-
-                # Show extracted entities
-                if result.nodes:
-                    for node_idx, node in enumerate(result.nodes, 1):
-                        entity_display = f"{node.name}"
-                        if hasattr(node, 'summary') and node.summary:
-                            entity_display += f" - {node.summary}"
-                        label = "エンティティ" if is_ja else "Entity"
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {
-                                "description": f"👤 {label} {node_idx}/{len(result.nodes)}: {entity_display}",
-                                "done": False
-                            }
-                        })
-
-            # Final status
-            if __event_emitter__:
-                complete_msg = "✅ メモリ追加完了" if is_ja else "✅ Memory added"
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {
-                        "description": complete_msg,
-                        "done": True
-                    }
-                })
-
-            # Build response message
-            response = f"✅ Memory added successfully!\n\n"
-            response += f"**Episode:** {name}\n"
-            response += f"**UUID:** `{result.episode.uuid}`\n"
-            response += f"**Source Type:** {source}\n"
-            
-            if result.nodes:
-                response += f"\n**Extracted Entities ({len(result.nodes)}):**\n"
-                for i, node in enumerate(result.nodes[:5], 1):  # Show first 5
-                    response += f"{i}. {node.name}\n"
-                if len(result.nodes) > 5:
-                    response += f"   ... and {len(result.nodes) - 5} more\n"
-            
-            if result.edges:
-                response += f"\n**Extracted Relationships ({len(result.edges)}):**\n"
-                for i, edge in enumerate(result.edges[:5], 1):  # Show first 5
-                    response += f"{i}. {edge.name}: {edge.fact}\n"
-                if len(result.edges) > 5:
-                    response += f"   ... and {len(result.edges) - 5} more\n"
-            
-            return response
-            
-        except Exception as e:
-            error_type = type(e).__name__
-            error_str = str(e)
-            
-            # Provide more specific error messages for common issues
-            if "ValidationError" in error_type or "validation error" in error_str.lower():
-                if source_type == EpisodeType.message:
-                    error_msg = f"❌ Error: LLM validation failed for message format.\n\n"
-                    error_msg += f"The content does not follow the required 'speaker: content' format.\n"
-                    error_msg += f"Each line must be formatted as: 'speaker_name: message_content'\n\n"
-                    error_msg += f"Valid format examples:\n"
-                    error_msg += f"  user: Hello, how are you?\n"
-                    error_msg += f"  assistant: I'm doing well, thank you!\n\n"
-                    error_msg += f"Technical details: {error_str}"
-                elif source_type == EpisodeType.json:
-                    error_msg = f"❌ Error: JSON type processing failed.\n\n"
-                    error_msg += f"Graphiti's JSON extraction encountered a validation error.\n"
-                    error_msg += f"This may be due to endpoint compatibility or JSON structure complexity.\n\n"
-                    error_msg += f"✅ Possible solutions:\n"
-                    error_msg += f"  1. USE TEXT TYPE: source='text' is more reliable across endpoints\n"
-                    error_msg += f"     (Still extracts entities and relationships from JSON content)\n\n"
-                    error_msg += f"  2. SIMPLIFY JSON: Flatten nested structures or reduce field count\n\n"
-                    error_msg += f"  3. CONFIGURATION: The administrator may need to adjust llm_client_type in Valves\n\n"
-                    if self.valves.debug_print:
-                        error_msg += f"\nTechnical details: {error_str}"
-                else:
-                    error_msg = f"❌ Error: LLM validation failed.\n\n"
-                    error_msg += f"The LLM response format was unexpected.\n"
-                    error_msg += f"This may indicate endpoint compatibility issues.\n\n"
-                    error_msg += f"The administrator may need to adjust llm_client_type or endpoint configuration in Valves.\n"
-                    if self.valves.debug_print:
-                        error_msg += f"\n\nTechnical details: {error_str}"
-            elif "ConnectionError" in error_type or "timeout" in error_str.lower():
-                error_msg = f"❌ Error: Connection error to LLM service.\n"
-                error_msg += f"Network connection or endpoint configuration issue.\n"
-                if self.valves.debug_print:
-                    error_msg += f"\nDetails: {error_str}"
-            elif "api_key" in error_str.lower() or "authentication" in error_str.lower() or "unauthorized" in error_str.lower():
-                error_msg = f"❌ Error: Authentication failed.\n"
-                error_msg += f"API key configuration issue in Valves.\n"
-                if self.valves.debug_print:
-                    error_msg += f"\nDetails: {error_str}"
-            else:
-                error_msg = f"❌ Error adding memory: {error_str}\n\n"
-                error_msg += f"Possible solutions:\n"
-                error_msg += f"  - Using 'text' source type may work better\n"
-                error_msg += f"  - The administrator may need to verify endpoint configuration in Valves\n"
-                if self.valves.debug_print:
-                    error_msg += f"\n\nNote: Enable debug_print in Valves for detailed error information."
-            
-            if self.valves.debug_print:
-                print(f"Exception type: {error_type}")
-                traceback.print_exc()
-            
-            return error_msg
+# NOTE: add_memory is commented out by default because Filter handles automatic memory saving.
+# Uncomment this method if you need AI to explicitly add memories on demand (e.g., when Filter is disabled).
+#
+#    async def add_memory(
+#        self,
+#        name: str,
+#        content: str,
+#        source: str = "text",
+#        source_description: str = "",
+#        __user__: dict = {},
+#        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+#    ) -> str:
+#        """
+#        Add a new memory episode to the knowledge graph.
+#        
+#        This tool creates a new episode and automatically extracts entities and relationships.
+#        The episode is processed to identify key information and integrate it into the knowledge graph.
+#        
+#        :param name: Name/title of the episode (e.g., "Meeting with client", "Product launch announcement")
+#        :param content: The content to store as memory. Can be text, conversation, or JSON data.
+#        :param source: Type of source content. Options are:
+#                      - "text": Plain text content (default) - Most reliable option
+#                      - "message": Conversation-style content in "speaker: content" format.
+#                                   REQUIRED FORMAT: Each line must be "speaker_name: message_content"
+#                                   The speaker name will be automatically extracted as an entity.
+#                                   Example: "user: Hello" or "assistant: How can I help?"
+#                      - "json": Structured JSON data (must be valid JSON string)
+#                                ⚠️ WARNING: Experimental feature with known compatibility issues.
+#                                May fail with ValidationError depending on the LLM endpoint configuration.
+#                                If you encounter errors, use "text" source type instead (works with JSON content too).
+#        :param source_description: Description of where this memory came from (e.g., "team meeting notes", "customer email")
+#        :return: Result message with episode details
+#        
+#        Examples:
+#        - add_memory(name="Client Meeting", content="Discussed Q1 targets with John", source="text", source_description="meeting notes")
+#        - add_memory(name="Customer Chat", content="user: What's the return policy?\nassistant: 30-day returns", source="message", source_description="support chat")
+#        - add_memory(name="Product Data", content='{"product": "Widget X", "price": 99.99}', source="json", source_description="inventory system")
+#        
+#        Important Notes:
+#        - For source="message": Content MUST follow "speaker: content" format for each line
+#        - For source="json": Content must be a valid JSON string (will be validated)
+#        
+#        Note: __user__ and __event_emitter__ are automatically injected by the system.
+#        """
+#        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
+#            return "❌ Error: Memory service is not available"
+#        
+#        
+#        # Set user headers in context variable (before any API calls)
+#        headers = self._get_user_info_headers(__user__, None)
+#        if headers:
+#            user_headers_context.set(headers)
+#            if self.valves.debug_print:
+#                print(f"Set user headers in context: {list(headers.keys())}")
+#        
+#        source_type = None  # Initialize for error handling scope
+#        
+#        try:
+#            # Validate source type
+#            source_lower = source.lower()
+#            if source_lower == "text":
+#                source_type = EpisodeType.text
+#            elif source_lower == "message":
+#                source_type = EpisodeType.message
+#                # Validate message format using helper method
+#                is_valid, error_msg = GraphitiHelper.validate_message_format(content)
+#                if not is_valid:
+#                    return error_msg if error_msg else "❌ Error: Invalid message format"
+#            elif source_lower == "json":
+#                source_type = EpisodeType.json
+#                # Validate JSON format
+#                try:
+#                    json.loads(content)
+#                except json.JSONDecodeError as e:
+#                    return f"❌ Error: Invalid JSON content: {str(e)}\nPlease ensure the content is a valid JSON string."
+#            else:
+#                return f"❌ Error: Invalid source type '{source}'. Must be 'text', 'message', or 'json'"
+#            
+#            # Get user's group_id
+#            group_id = self.helper.get_group_id(__user__)
+#            if not group_id:
+#                return "❌ Error: Group ID is required. Please check your group_id_format configuration."
+#            
+#            if self.valves.debug_print:
+#                print(f"=== add_memory: Adding episode ===")
+#                print(f"Name: {name}")
+#                print(f"Source: {source_type}")
+#                print(f"Group ID: {group_id}")
+#                print(f"Content length: {len(content)} chars")
+#            
+#            # Add episode using Graphiti's add_episode method
+#            result = await self.helper.graphiti.add_episode(
+#                name=name,
+#                episode_body=content,
+#                source=source_type,
+#                source_description=source_description,
+#                reference_time=datetime.now(timezone.utc),
+#                group_id=group_id,
+#            )
+#            
+#            if self.valves.debug_print:
+#                print(f"=== Episode added successfully ===")
+#                print(f"Episode UUID: {result.episode.uuid}")
+#                print(f"Extracted {len(result.nodes)} entities")
+#                print(f"Extracted {len(result.edges)} relationships")
+#            
+#            # Get user's language and display preferences
+#            user_valves = self.UserValves.model_validate(
+#                (__user__ or {}).get("valves", {})
+#            )
+#            is_ja = user_valves.message_language == "ja"
+#
+#            # Display extracted entities and facts in status (if enabled)
+#            if __event_emitter__ and result and user_valves.show_extracted_details:
+#                # Show extracted facts
+#                if result.edges:
+#                    for edge_idx, edge in enumerate(result.edges, 1):
+#                        emoji = "🔚" if edge.invalid_at else "🔛"
+#                        label = "ファクト" if is_ja else "Fact"
+#                        await __event_emitter__({
+#                            "type": "status",
+#                            "data": {
+#                                "description": f"{emoji} {label} {edge_idx}/{len(result.edges)}: {edge.fact}",
+#                                "done": False
+#                            }
+#                        })
+#
+#                # Show extracted entities
+#                if result.nodes:
+#                    for node_idx, node in enumerate(result.nodes, 1):
+#                        entity_display = f"{node.name}"
+#                        if hasattr(node, 'summary') and node.summary:
+#                            entity_display += f" - {node.summary}"
+#                        label = "エンティティ" if is_ja else "Entity"
+#                        await __event_emitter__({
+#                            "type": "status",
+#                            "data": {
+#                                "description": f"👤 {label} {node_idx}/{len(result.nodes)}: {entity_display}",
+#                                "done": False
+#                            }
+#                        })
+#
+#            # Final status
+#            if __event_emitter__:
+#                complete_msg = "✅ メモリ追加完了" if is_ja else "✅ Memory added"
+#                await __event_emitter__({
+#                    "type": "status",
+#                    "data": {
+#                        "description": complete_msg,
+#                        "done": True
+#                    }
+#                })
+#
+#            # Build response message
+#            response = f"✅ Memory added successfully!\n\n"
+#            response += f"**Episode:** {name}\n"
+#            response += f"**UUID:** `{result.episode.uuid}`\n"
+#            response += f"**Source Type:** {source}\n"
+#            
+#            if result.nodes:
+#                response += f"\n**Extracted Entities ({len(result.nodes)}):**\n"
+#                for i, node in enumerate(result.nodes[:5], 1):  # Show first 5
+#                    response += f"{i}. {node.name}\n"
+#                if len(result.nodes) > 5:
+#                    response += f"   ... and {len(result.nodes) - 5} more\n"
+#            
+#            if result.edges:
+#                response += f"\n**Extracted Relationships ({len(result.edges)}):**\n"
+#                for i, edge in enumerate(result.edges[:5], 1):  # Show first 5
+#                    response += f"{i}. {edge.name}: {edge.fact}\n"
+#                if len(result.edges) > 5:
+#                    response += f"   ... and {len(result.edges) - 5} more\n"
+#            
+#            return response
+#            
+#        except Exception as e:
+#            error_type = type(e).__name__
+#            error_str = str(e)
+#            
+#            # Provide more specific error messages for common issues
+#            if "ValidationError" in error_type or "validation error" in error_str.lower():
+#                if source_type == EpisodeType.message:
+#                    error_msg = f"❌ Error: LLM validation failed for message format.\n\n"
+#                    error_msg += f"The content does not follow the required 'speaker: content' format.\n"
+#                    error_msg += f"Each line must be formatted as: 'speaker_name: message_content'\n\n"
+#                    error_msg += f"Valid format examples:\n"
+#                    error_msg += f"  user: Hello, how are you?\n"
+#                    error_msg += f"  assistant: I'm doing well, thank you!\n\n"
+#                    error_msg += f"Technical details: {error_str}"
+#                elif source_type == EpisodeType.json:
+#                    error_msg = f"❌ Error: JSON type processing failed.\n\n"
+#                    error_msg += f"Graphiti's JSON extraction encountered a validation error.\n"
+#                    error_msg += f"This may be due to endpoint compatibility or JSON structure complexity.\n\n"
+#                    error_msg += f"✅ Possible solutions:\n"
+#                    error_msg += f"  1. USE TEXT TYPE: source='text' is more reliable across endpoints\n"
+#                    error_msg += f"     (Still extracts entities and relationships from JSON content)\n\n"
+#                    error_msg += f"  2. SIMPLIFY JSON: Flatten nested structures or reduce field count\n\n"
+#                    error_msg += f"  3. CONFIGURATION: The administrator may need to adjust llm_client_type in Valves\n\n"
+#                    if self.valves.debug_print:
+#                        error_msg += f"\nTechnical details: {error_str}"
+#                else:
+#                    error_msg = f"❌ Error: LLM validation failed.\n\n"
+#                    error_msg += f"The LLM response format was unexpected.\n"
+#                    error_msg += f"This may indicate endpoint compatibility issues.\n\n"
+#                    error_msg += f"The administrator may need to adjust llm_client_type or endpoint configuration in Valves.\n"
+#                    if self.valves.debug_print:
+#                        error_msg += f"\n\nTechnical details: {error_str}"
+#            elif "ConnectionError" in error_type or "timeout" in error_str.lower():
+#                error_msg = f"❌ Error: Connection error to LLM service.\n"
+#                error_msg += f"Network connection or endpoint configuration issue.\n"
+#                if self.valves.debug_print:
+#                    error_msg += f"\nDetails: {error_str}"
+#            elif "api_key" in error_str.lower() or "authentication" in error_str.lower() or "unauthorized" in error_str.lower():
+#                error_msg = f"❌ Error: Authentication failed.\n"
+#                error_msg += f"API key configuration issue in Valves.\n"
+#                if self.valves.debug_print:
+#                    error_msg += f"\nDetails: {error_str}"
+#            else:
+#                error_msg = f"❌ Error adding memory: {error_str}\n\n"
+#                error_msg += f"Possible solutions:\n"
+#                error_msg += f"  - Using 'text' source type may work better\n"
+#                error_msg += f"  - The administrator may need to verify endpoint configuration in Valves\n"
+#                if self.valves.debug_print:
+#                    error_msg += f"\n\nNote: Enable debug_print in Valves for detailed error information."
+#            
+#            if self.valves.debug_print:
+#                print(f"Exception type: {error_type}")
+#                traceback.print_exc()
+#            
+#            return error_msg
 
     async def migrate_builtin_memories(
         self,

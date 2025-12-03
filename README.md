@@ -61,6 +61,7 @@ AI-callable tools for memory management.
 
 **Features:**
 
+- **Add Memory**: Let AI add specific episodes to the knowledge graph on demand (commented out by default; uncomment if Filter is disabled)
 - **Migration**: Migrate Open WebUI's built-in memories to Graphiti knowledge graph
 - **Precise Search**: Search for specific Entities, Facts (relationships), or Episodes separately
 - **Confirmation Dialogs**: Well-designed confirmation dialogs before deletion operations
