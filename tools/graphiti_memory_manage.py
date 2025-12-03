@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.4.0
+version: 0.5.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -521,10 +521,13 @@ class GraphitiHelper:
         """
         Show confirmation dialog and wait for user response.
         Helper method for Tools class - not exposed to AI.
-        
+
+        This method can be used for any operation requiring user confirmation,
+        not limited to deletion operations.
+
         :param title: Dialog title
         :param items: List of items to display for confirmation
-        :param warning_message: Warning message to show
+        :param warning_message: Warning or informational message to show
         :param timeout: Timeout in seconds
         :param __user__: User information dictionary
         :param __event_call__: Event caller for confirmation dialog
@@ -533,28 +536,28 @@ class GraphitiHelper:
                  - error_message: Empty string if confirmed, error message otherwise
         """
         if not __event_call__:
-            return False, "❌ Error: Confirmation dialog is not available. Cannot perform deletion without user confirmation."
-        
+            return False, "❌ Error: Confirmation dialog is not available. Cannot perform operation without user confirmation."
+
         preview_text = "  \n".join(items)
-        
+
         # Get user's language preference from UserValves
         is_japanese = self.is_japanese_preferred(__user__)
-        
+
         if is_japanese:
-            confirmation_message = f"""以下の項目を削除しますか？  
-  
-{preview_text}  
-  
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
-{warning_message}  
+            confirmation_message = f"""以下の操作を実行しますか？
+
+{preview_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{warning_message}
 ⏰ {timeout}秒以内に選択しないと自動的にキャンセルされます。"""
         else:
-            confirmation_message = f"""Do you want to delete the following items?  
-  
-{preview_text}  
-  
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
-{warning_message}  
+            confirmation_message = f"""Do you want to proceed with the following operation?
+
+{preview_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{warning_message}
 ⏰ Auto-cancel in {timeout} seconds if no selection is made."""
         
         try:
@@ -912,7 +915,369 @@ class Tools:
                 traceback.print_exc()
             
             return error_msg
-    
+
+    async def migrate_builtin_memories(
+        self,
+        dry_run: bool = False,
+        __user__: dict = {},
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+        __event_call__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Migrate Open WebUI built-in memories to Graphiti knowledge graph.
+
+        This method safely migrates all built-in memories for the current user to Graphiti episodes.
+        The migration is idempotent - running it multiple times will not create duplicates.
+
+        Migration Strategy:
+        - Each built-in memory is converted to a Graphiti episode
+        - Source type: EpisodeType.text (built-in memories are text-based)
+        - Episode name: {timestamp}_Migrated_{memory_id} format (e.g., "20241225T093000Z_Migrated_uuid")
+        - Timestamp: Preserved from built-in memory's created_at in UTC
+        - Idempotency marker: source_description = "migrated_builtin_memory:{memory.id}"
+
+        Parameters:
+        - dry_run: If True, preview what would be migrated without making changes
+                   Confirmation dialog is skipped in dry-run mode
+                   Default: False
+
+        Returns:
+        - str: Migration summary report with statistics
+
+        Examples:
+        - migrate_builtin_memories() → Migrate all memories (with confirmation)
+        - migrate_builtin_memories(dry_run=True) → Preview migration without changes
+
+        Safety Features:
+        - Idempotent: Safe to run multiple times (checks source_description)
+        - Graceful failure: Individual failures don't stop the migration
+        - Confirmation dialog: Requires user approval when dry_run=False
+        - Detailed reporting: Shows success, failures, and already migrated counts
+        - Preserves timestamps: Maintains original creation time in UTC
+
+        Note: Built-in memories are NOT deleted after migration. Users can manually
+              delete them from Open WebUI UI (Settings → Personalization → Memory).
+        """
+
+        # === Phase 1: Initialization & Validation ===
+
+        if self.valves.debug_print:
+            print("=== migrate_builtin_memories: Starting ===")
+
+        # 1. Ensure Graphiti is initialized
+        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
+            return "❌ Error: Memory service is not available. Please check Graphiti configuration."
+
+        # 2. Set user headers for API calls
+        headers = self._get_user_info_headers(__user__, None)
+        if headers:
+            user_headers_context.set(headers)
+            if self.valves.debug_print:
+                print(f"Set user headers: {list(headers.keys())}")
+
+        # 3. Get group_id for episode filtering
+        group_id = self.helper.get_group_id(__user__)
+        if not group_id:
+            return "❌ Error: Group ID required. Check group_id_format configuration."
+
+        # 4. Get user_id for Memories query
+        user_id = __user__.get("id")
+        if not user_id:
+            return "❌ Error: User ID required for migration."
+
+        if self.valves.debug_print:
+            print(f"User ID: {user_id}")
+            print(f"Group ID: {group_id}")
+
+        # === Phase 2: Fetch Built-in Memories ===
+
+        # Import Memories module
+        try:
+            from open_webui.models.memories import Memories
+        except Exception as e:
+            return f"❌ Error: Cannot import Memories module: {e}\nPlease ensure you are running in Open WebUI environment."
+
+        # Fetch all built-in memories for user
+        try:
+            builtin_memories = Memories.get_memories_by_user_id(user_id)
+            if not builtin_memories:
+                return "ℹ️ No built-in memories found for this user."
+
+            if self.valves.debug_print:
+                print(f"Found {len(builtin_memories)} built-in memories")
+        except Exception as e:
+            error_msg = f"❌ Error: Failed to fetch built-in memories: {e}"
+            if self.valves.debug_print:
+                traceback.print_exc()
+            return error_msg
+
+        # === Phase 3: Check Existing Migrations (Idempotency) ===
+
+        # Fetch all existing Graphiti episodes for this group
+        try:
+            existing_episodes = await EpisodicNode.get_by_group_ids(
+                self.helper.graphiti.driver,
+                [group_id]
+            )
+
+            if self.valves.debug_print:
+                print(f"Found {len(existing_episodes)} existing Graphiti episodes")
+        except Exception as e:
+            error_msg = f"❌ Error: Failed to fetch existing episodes: {e}"
+            if self.valves.debug_print:
+                traceback.print_exc()
+            return error_msg
+
+        # Extract already-migrated memory IDs
+        migrated_memory_ids = set()
+        for episode in existing_episodes:
+            source_desc = getattr(episode, 'source_description', '')
+            if source_desc.startswith('migrated_builtin_memory:'):
+                memory_id = source_desc.split(':', 1)[1]
+                migrated_memory_ids.add(memory_id)
+
+        if self.valves.debug_print:
+            print(f"Already migrated: {len(migrated_memory_ids)} memories")
+
+        # Filter to unmigrated memories only and sort by created_at (oldest first)
+        memories_to_migrate = sorted(
+            [mem for mem in builtin_memories if mem.id not in migrated_memory_ids],
+            key=lambda m: m.created_at
+        )
+
+        if not memories_to_migrate:
+            total = len(builtin_memories)
+            return f"✅ All {total} built-in memories have already been migrated."
+
+        if self.valves.debug_print:
+            print(f"To migrate: {len(memories_to_migrate)} memories")
+
+        # === Phase 4: Confirmation Dialog (if dry_run=False) ===
+
+        if not dry_run:
+            # Get user's language preference
+            user_valves = self.UserValves.model_validate(
+                (__user__ or {}).get("valves", {})
+            )
+            is_ja = user_valves.message_language == "ja"
+
+            # Create confirmation dialog content
+            if is_ja:
+                title = "メモリ移行の確認"
+                items = [
+                    f"移行対象: {len(memories_to_migrate)} 件のビルトインメモリ",
+                    f"移行先グループ: {group_id}",
+                    f"既に移行済み: {len(migrated_memory_ids)} 件",
+                ]
+                warning = "ℹ️ ビルトインメモリは削除されません。移行後、必要に応じて手動で削除してください。"
+            else:
+                title = "Confirm Memory Migration"
+                items = [
+                    f"Memories to migrate: {len(memories_to_migrate)} built-in memories",
+                    f"Target group: {group_id}",
+                    f"Already migrated: {len(migrated_memory_ids)} memories",
+                ]
+                warning = "ℹ️ Built-in memories will NOT be deleted. You can manually delete them after migration if needed."
+
+            # Show confirmation dialog
+            try:
+                confirmed, error_msg = await self.helper.show_confirmation_dialog(
+                    title=title,
+                    items=items,
+                    warning_message=warning,
+                    timeout=self.valves.confirmation_timeout,
+                    __user__=__user__,
+                    __event_call__=__event_call__,
+                )
+
+                if not confirmed:
+                    return error_msg if error_msg else "❌ Migration cancelled by user."
+            except Exception as e:
+                error_msg = f"❌ Confirmation dialog error: {e}"
+                if self.valves.debug_print:
+                    traceback.print_exc()
+                return error_msg
+
+        # === Phase 5: Migration Execution ===
+
+        # Get user's language preference for progress messages
+        user_valves = self.UserValves.model_validate(
+            (__user__ or {}).get("valves", {})
+        )
+        is_ja = user_valves.message_language == "ja"
+
+        migrated_count = 0
+        failed_count = 0
+        failed_memories = []
+
+        for idx, memory in enumerate(memories_to_migrate, 1):
+            try:
+                # Format memory info for status display
+                memory_date = datetime.fromtimestamp(memory.created_at, tz=timezone.utc).strftime("%Y-%m-%d")
+                content_preview = memory.content or "(empty)"
+
+                # Progress notification
+                if __event_emitter__:
+                    progress_msg = f"🔄 メモリを移行中 {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}" if is_ja else f"🔄 Migrating memory {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}"
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {
+                            "description": progress_msg,
+                            "done": False
+                        }
+                    })
+
+                if dry_run:
+                    # Dry-run: skip actual migration
+                    continue
+
+                # Generate episode name with timestamp prefix (consistent with Filter format)
+                timestamp_prefix = datetime.fromtimestamp(memory.created_at, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                episode_name = f"{timestamp_prefix}_Migrated_{memory.id}"
+
+                # Create episode with idempotency marker
+                result = await self.helper.graphiti.add_episode(
+                    name=episode_name,
+                    episode_body=memory.content,
+                    source=EpisodeType.text,
+                    source_description=f"migrated_builtin_memory:{memory.id}",
+                    reference_time=datetime.fromtimestamp(
+                        memory.created_at,
+                        tz=timezone.utc
+                    ),
+                    group_id=group_id,
+                )
+
+                migrated_count += 1
+
+                if self.valves.debug_print:
+                    print(f"✓ Migrated memory {memory.id} -> episode {result.episode.uuid}")
+
+                # Display extracted entities and facts in status
+                if __event_emitter__ and result:
+                    # Show extracted facts
+                    if result.edges:
+                        for edge_idx, edge in enumerate(result.edges, 1):
+                            emoji = "🔚" if edge.invalid_at else "🔛"
+                            label = "ファクト" if is_ja else "Fact"
+                            await __event_emitter__({
+                                "type": "status",
+                                "data": {
+                                    "description": f"{emoji} {label} {edge_idx}/{len(result.edges)}: {edge.fact}",
+                                    "done": False
+                                }
+                            })
+
+                    # Show extracted entities
+                    if result.nodes:
+                        for node_idx, node in enumerate(result.nodes, 1):
+                            entity_display = f"{node.name}"
+                            if hasattr(node, 'summary') and node.summary:
+                                entity_display += f" - {node.summary}"
+                            label = "エンティティ" if is_ja else "Entity"
+                            await __event_emitter__({
+                                "type": "status",
+                                "data": {
+                                    "description": f"👤 {label} {node_idx}/{len(result.nodes)}: {entity_display}",
+                                    "done": False
+                                }
+                            })
+
+            except asyncio.CancelledError:
+                # User pressed stop button - cancel migration gracefully
+                # Already migrated memories are saved in Graphiti and will be skipped on retry (idempotent)
+                if __event_emitter__:
+                    cancel_msg = f"⏹️ 移行が中断されました ({migrated_count}/{len(memories_to_migrate)} 完了)" if is_ja else f"⏹️ Migration interrupted ({migrated_count}/{len(memories_to_migrate)} completed)"
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {
+                            "description": cancel_msg,
+                            "done": True
+                        }
+                    })
+                if self.valves.debug_print:
+                    print(f"⚠ Migration cancelled by user. Progress: {migrated_count}/{len(memories_to_migrate)} migrated")
+                # Re-raise to let Open WebUI middleware handle the cancellation properly
+                raise
+
+            except Exception as e:
+                failed_count += 1
+                error_str = str(e)
+                content_preview = memory.content[:50] if memory.content else "(empty)"
+                failed_memories.append({
+                    "id": memory.id,
+                    "error": error_str,
+                    "content_preview": content_preview
+                })
+
+                # Show error status notification
+                if __event_emitter__:
+                    error_msg = f"⚠️ 移行失敗 ({idx}/{len(memories_to_migrate)}): {content_preview}..." if is_ja else f"⚠️ Migration failed ({idx}/{len(memories_to_migrate)}): {content_preview}..."
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {
+                            "description": error_msg,
+                            "done": False
+                        }
+                    })
+
+                if self.valves.debug_print:
+                    print(f"✗ Failed to migrate memory {memory.id}: {e}")
+                    traceback.print_exc()
+
+                # Continue with remaining memories
+                continue
+
+        # Final progress notification
+        if __event_emitter__:
+            complete_msg = "✅ 移行完了" if is_ja else "✅ Migration complete"
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": complete_msg,
+                    "done": True
+                }
+            })
+
+        # === Phase 6: Result Report ===
+
+        # Build result summary
+        result_lines = []
+
+        if dry_run:
+            result_lines.append("🔍 **Dry Run Mode** (No actual changes made)")
+            result_lines.append("")
+
+        result_lines.append("# Migration Summary")
+        result_lines.append("")
+        result_lines.append(f"**Total built-in memories:** {len(builtin_memories)}")
+        result_lines.append(f"**Already migrated:** {len(migrated_memory_ids)}")
+        result_lines.append(f"**To migrate:** {len(memories_to_migrate)}")
+        result_lines.append("")
+
+        if not dry_run:
+            result_lines.append(f"**Successfully migrated:** {migrated_count}")
+            if failed_count > 0:
+                result_lines.append(f"**Failed:** {failed_count}")
+        else:
+            result_lines.append(f"**Would migrate:** {len(memories_to_migrate)} memories")
+
+        if failed_memories and not dry_run:
+            result_lines.append("")
+            result_lines.append("## Failed Migrations")
+            for failure in failed_memories[:5]:  # Show first 5 failures
+                result_lines.append(f"- **ID:** {failure['id']}")
+                result_lines.append(f"  - Content: {failure['content_preview']}...")
+                result_lines.append(f"  - Error: {failure['error']}")
+
+            if len(failed_memories) > 5:
+                result_lines.append(f"- ... and {len(failed_memories) - 5} more failures")
+
+        if self.valves.debug_print:
+            print("=== migrate_builtin_memories: Complete ===")
+
+        return "\n".join(result_lines)
+
     async def search_entities(
         self,
         query: str,
