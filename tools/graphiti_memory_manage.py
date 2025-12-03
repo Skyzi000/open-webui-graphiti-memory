@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.5.0
+version: 0.5.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -683,6 +683,12 @@ class Tools:
             default="en",
             description="Language for confirmation dialog messages: 'en' (English) or 'ja' (Japanese)",
         )
+        show_extracted_details: bool = Field(
+            default=True,
+            description="Show extracted entities and facts in status after adding memory or during migration. Set to False to reduce status message noise.",
+        )
+        pass
+
     def __init__(self):
         self.valves = self.Valves()
         self.helper = GraphitiHelper(self)
@@ -838,6 +844,53 @@ class Tools:
                 print(f"Extracted {len(result.nodes)} entities")
                 print(f"Extracted {len(result.edges)} relationships")
             
+            # Get user's language and display preferences
+            user_valves = self.UserValves.model_validate(
+                (__user__ or {}).get("valves", {})
+            )
+            is_ja = user_valves.message_language == "ja"
+
+            # Display extracted entities and facts in status (if enabled)
+            if __event_emitter__ and result and user_valves.show_extracted_details:
+                # Show extracted facts
+                if result.edges:
+                    for edge_idx, edge in enumerate(result.edges, 1):
+                        emoji = "🔚" if edge.invalid_at else "🔛"
+                        label = "ファクト" if is_ja else "Fact"
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {
+                                "description": f"{emoji} {label} {edge_idx}/{len(result.edges)}: {edge.fact}",
+                                "done": False
+                            }
+                        })
+
+                # Show extracted entities
+                if result.nodes:
+                    for node_idx, node in enumerate(result.nodes, 1):
+                        entity_display = f"{node.name}"
+                        if hasattr(node, 'summary') and node.summary:
+                            entity_display += f" - {node.summary}"
+                        label = "エンティティ" if is_ja else "Entity"
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {
+                                "description": f"👤 {label} {node_idx}/{len(result.nodes)}: {entity_display}",
+                                "done": False
+                            }
+                        })
+
+            # Final status
+            if __event_emitter__:
+                complete_msg = "✅ メモリ追加完了" if is_ja else "✅ Memory added"
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": complete_msg,
+                        "done": True
+                    }
+                })
+
             # Build response message
             response = f"✅ Memory added successfully!\n\n"
             response += f"**Episode:** {name}\n"
@@ -1153,8 +1206,8 @@ class Tools:
                 if self.valves.debug_print:
                     print(f"✓ Migrated memory {memory.id} -> episode {result.episode.uuid}")
 
-                # Display extracted entities and facts in status
-                if __event_emitter__ and result:
+                # Display extracted entities and facts in status (if enabled)
+                if __event_emitter__ and result and user_valves.show_extracted_details:
                     # Show extracted facts
                     if result.edges:
                         for edge_idx, edge in enumerate(result.edges, 1):
