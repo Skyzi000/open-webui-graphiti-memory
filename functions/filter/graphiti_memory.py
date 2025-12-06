@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.16.2
+version: 0.17.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -397,6 +397,23 @@ class Filter:
                 "Note: The deletion result will be shown via AI response, but the actual deletion "
                 "is performed by the Filter without AI involvement."
             ),
+        )
+        wait_for_chat_title: bool = Field(
+            default=True,
+            description=(
+                "Wait for the chat title to be auto-generated before saving episodes. "
+                "When enabled, if the chat title is a default title (e.g., 'New Chat', '新しいチャット'), "
+                "the filter will poll until a custom title is generated or timeout is reached. "
+                "If your language's default title is not recognized, edit _is_default_chat_title() to add it."
+            ),
+        )
+        wait_for_chat_title_timeout: float = Field(
+            default=30.0,
+            description="Maximum time (in seconds) to wait for chat title auto-generation. Default is 30 seconds.",
+        )
+        wait_for_chat_title_interval: float = Field(
+            default=1.0,
+            description="Polling interval (in seconds) when waiting for chat title. Default is 1 second.",
         )
 
     class UserValves(BaseModel):
@@ -1496,6 +1513,216 @@ class Filter:
             return Chats.get_chat_title_by_id(str(chat_id))
         except Exception:
             return None
+
+    def _is_default_chat_title(self, title: Optional[str]) -> bool:
+        """
+        Check if the given title is a default/placeholder chat title.
+        Supports default titles in all Open WebUI supported languages.
+
+        Returns True if:
+        - title is None or empty
+        - title matches known default titles (e.g., 'New Chat', '新しいチャット', etc.)
+        """
+        if not title:
+            return True
+
+        # All known default "New Chat" titles from Open WebUI i18n locales
+        # These are the translations of "New Chat" key from all translation.json files
+        default_titles = frozenset([
+            # English (base)
+            "New Chat",
+            # Arabic
+            "دردشة جديدة",
+            # Bengali
+            "নতুন চ্যাট",
+            # Bosnian / Croatian
+            "Novi razgovor",
+            # Bulgarian
+            "Нов чат",
+            # Catalan
+            "Nou xat",
+            # Cebuano
+            "Bag-ong diskusyon",
+            # Czech
+            "Nová konverzace",
+            # Danish / Norwegian
+            "Ny chat",
+            # Dogri (dg-DG)
+            "New Bark",
+            # Dutch
+            "Nieuwe Chat",
+            # Estonian
+            "Uus vestlus",
+            # Basque
+            "Txat berria",
+            # Finnish
+            "Uusi keskustelu",
+            # French
+            "Nouvelle conversation",
+            # Galician
+            "Novo Chat",
+            # Georgian
+            "ახალი მიმოწერა",
+            # German
+            "Neuer Chat",
+            # Greek
+            "Νέα Συνομιλία",
+            # Hebrew
+            "צ'אט חדש",
+            # Hindi
+            "नई चैट",
+            # Hungarian
+            "Új beszélgetés",
+            # Indonesian
+            "Obrolan Baru",
+            # Irish
+            "Comhrá Nua",
+            # Italian
+            "Nuova chat",
+            # Japanese
+            "新しいチャット",
+            # Kabyle
+            "Asqerdec amaynut",
+            # Korean
+            "새 채팅",
+            # Lithuanian
+            "Naujas pokalbis",
+            # Malay
+            "Perbualan Baru",
+            # Persian
+            "گپ جدید",
+            # Polish
+            "Nowy czat",
+            # Portuguese (Brazil)
+            "Novo Chat",
+            # Portuguese (Portugal)
+            "Nova Conversa",
+            # Punjabi
+            "ਨਵੀਂ ਗੱਲਬਾਤ",
+            # Romanian
+            "Conversație Nouă",
+            # Russian
+            "Новый чат",
+            # Serbian
+            "Ново ћаскање",
+            # Slovak
+            "Nový chat",
+            # Spanish
+            "Nuevo Chat",
+            # Swedish
+            "Ny chatt",
+            # Thai
+            "แชทใหม่",
+            # Tibetan
+            "ཁ་བརྡ་གསར་པ།",
+            # Turkish
+            "Yeni Sohbet",
+            # Ukrainian
+            "Новий чат",
+            # Urdu
+            "نئی بات چیت",
+            # Uyghur
+            "يېڭى سۆھبەت",
+            # Uzbek (Cyrillic)
+            "Янги чат",
+            # Uzbek (Latin)
+            "Yangi chat",
+            # Vietnamese
+            "Tạo chat mới",
+            # Chinese (Simplified)
+            "新对话",
+            # Chinese (Traditional)
+            "新增對話",
+        ])
+
+        return title in default_titles
+
+    async def _wait_for_chat_title(
+        self,
+        chat_id: Optional[str],
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+        user_valves: Optional["Filter.UserValves"] = None,
+    ) -> Optional[str]:
+        """
+        Wait for the chat title to be auto-generated if it's currently a default title.
+        Polls the database until a non-default title is found or timeout is reached.
+
+        Returns the resolved title (may still be default if timeout is reached).
+        """
+        if not self.valves.wait_for_chat_title:
+            # Feature disabled, return current title immediately
+            return self._get_chat_title(chat_id)
+
+        if not chat_id or chat_id == "unknown":
+            return None
+
+        timeout = self.valves.wait_for_chat_title_timeout
+        interval = self.valves.wait_for_chat_title_interval
+        start_time = time.time()
+
+        # Check if we should show status
+        show_status = user_valves.show_status if user_valves else False
+        is_ja = self._is_japanese_preferred(user_valves) if user_valves else False
+
+        # Check initial title
+        title = self._get_chat_title(chat_id)
+        if not self._is_default_chat_title(title):
+            # Already has a custom title, no need to wait
+            return title
+
+        # Show waiting status
+        showed_waiting_status = False
+        if show_status and __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "⏳ チャットタイトルの設定を待機中..." if is_ja else "⏳ Waiting for chat title...",
+                        "done": False,
+                    },
+                }
+            )
+            showed_waiting_status = True
+
+        while True:
+            title = self._get_chat_title(chat_id)
+
+            if not self._is_default_chat_title(title):
+                # Got a custom title
+                if self.valves.debug_print:
+                    elapsed = time.time() - start_time
+                    print(f"Chat title resolved to '{title}' after {elapsed:.2f}s")
+                if showed_waiting_status and __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"✓ チャットタイトル確認: {title}" if is_ja else f"✓ Chat title confirmed: {title}",
+                                "done": False,
+                            },
+                        }
+                    )
+                return title
+
+            elapsed = time.time() - start_time
+            if elapsed >= timeout:
+                # Timeout reached, return whatever we have
+                if self.valves.debug_print:
+                    print(f"Chat title wait timeout ({timeout}s) reached, using '{title}'")
+                if showed_waiting_status and __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⚠️ タイトル待機タイムアウト: {title}" if is_ja else f"⚠️ Title wait timeout: {title}",
+                                "done": False,
+                            },
+                        }
+                    )
+                return title
+
+            # Wait before next poll
+            await asyncio.sleep(interval)
 
     def _cleanup_expired_citations_locked(self, now: Optional[float] = None) -> None:
         """
@@ -4051,8 +4278,8 @@ window.addEventListener('resize', renderGraph, { passive: true });
             # Count user turns for labeling
             user_turn_index = sum(1 for m in messages if m.get("role") == "user")
 
-            # Resolve chat title for episode name (fall back to default if unavailable)
-            chat_title = self._get_chat_title(chat_id) or "New Chat"
+            # Resolve chat title for episode name (optionally wait for auto-generation)
+            chat_title = await self._wait_for_chat_title(chat_id, __event_emitter__, user_valves) or "New Chat"
             episode_name = (
                 f"{chat_title}_turn{user_turn_index}"
                 if user_turn_index > 0
