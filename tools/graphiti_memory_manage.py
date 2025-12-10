@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.5.1
+version: 0.5.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -582,6 +582,54 @@ class GraphitiHelper:
         except Exception:
             return False, "❌ Error: Failed to show confirmation dialog"
 
+
+def get_user_info_headers(valves, user: Optional[dict] = None, chat_id: Optional[str] = None) -> dict:
+    """
+    Build user information headers dictionary.
+
+    Args:
+        valves: Valves object containing forward_user_info_headers setting
+        user: User dictionary containing 'id', 'email', 'name', 'role'
+        chat_id: Current chat ID
+
+    Returns:
+        Dictionary of headers to send to OpenAI API
+    """
+    # Check Valves setting first
+    valves_setting = valves.forward_user_info_headers.lower()
+
+    if valves_setting == 'true':
+        enable_forward = True
+    elif valves_setting == 'false':
+        enable_forward = False
+    elif valves_setting == 'default':
+        # Use environment variable (defaults to false if not set)
+        env_setting = os.environ.get('ENABLE_FORWARD_USER_INFO_HEADERS', 'false').lower()
+        enable_forward = env_setting == 'true'
+    else:
+        # Invalid value, default to false
+        enable_forward = False
+
+    if not enable_forward:
+        return {}
+
+    headers = {}
+    if user:
+        if user.get('name'):
+            headers['X-OpenWebUI-User-Name'] = quote(str(user['name']), safe=" ")
+        if user.get('id'):
+            headers['X-OpenWebUI-User-Id'] = str(user['id'])
+        if user.get('email'):
+            headers['X-OpenWebUI-User-Email'] = str(user['email'])
+        if user.get('role'):
+            headers['X-OpenWebUI-User-Role'] = str(user['role'])
+
+    if chat_id:
+        headers['X-OpenWebUI-Chat-Id'] = str(chat_id)
+
+    return headers
+
+
 class Tools:
     class Valves(BaseModel):
         llm_client_type: str = Field(
@@ -695,51 +743,6 @@ class Tools:
         
         # Don't initialize here - Valves may not be loaded yet
         # Initialization happens lazily on first use via ensure_graphiti_initialized()
-    
-    def _get_user_info_headers(self, user: Optional[dict] = None, chat_id: Optional[str] = None) -> dict:
-        """
-        Build user information headers dictionary.
-        
-        Args:
-            user: User dictionary containing 'id', 'email', 'name', 'role'
-            chat_id: Current chat ID
-            
-        Returns:
-            Dictionary of headers to send to OpenAI API
-        """
-        # Check Valves setting first
-        valves_setting = self.valves.forward_user_info_headers.lower()
-        
-        if valves_setting == 'true':
-            enable_forward = True
-        elif valves_setting == 'false':
-            enable_forward = False
-        elif valves_setting == 'default':
-            # Use environment variable (defaults to false if not set)
-            env_setting = os.environ.get('ENABLE_FORWARD_USER_INFO_HEADERS', 'false').lower()
-            enable_forward = env_setting == 'true'
-        else:
-            # Invalid value, default to false
-            enable_forward = False
-        
-        if not enable_forward:
-            return {}
-        
-        headers = {}
-        if user:
-            if user.get('name'):
-                headers['X-OpenWebUI-User-Name'] = quote(str(user['name']), safe=" ")
-            if user.get('id'):
-                headers['X-OpenWebUI-User-Id'] = str(user['id'])
-            if user.get('email'):
-                headers['X-OpenWebUI-User-Email'] = str(user['email'])
-            if user.get('role'):
-                headers['X-OpenWebUI-User-Role'] = str(user['role'])
-        
-        if chat_id:
-            headers['X-OpenWebUI-Chat-Id'] = str(chat_id)
-        
-        return headers
 
 # NOTE: add_memory is commented out by default because Filter handles automatic memory saving.
 # Uncomment this method if you need AI to explicitly add memories on demand (e.g., when Filter is disabled).
@@ -790,7 +793,7 @@ class Tools:
 #        
 #        
 #        # Set user headers in context variable (before any API calls)
-#        headers = self._get_user_info_headers(__user__, None)
+#        headers = get_user_info_headers(self.valves, __user__, None)
 #        if headers:
 #            user_headers_context.set(headers)
 #            if self.valves.debug_print:
@@ -1025,7 +1028,7 @@ class Tools:
             return "❌ Error: Memory service is not available. Please check Graphiti configuration."
 
         # 2. Set user headers for API calls
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -1361,7 +1364,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -1442,7 +1445,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -1524,7 +1527,7 @@ class Tools:
 
 
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -1617,7 +1620,7 @@ class Tools:
             return "❌ Error: Memory service is not available"
 
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -1723,7 +1726,7 @@ class Tools:
             return "❌ Error: Memory service is not available"
 
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -1826,7 +1829,7 @@ class Tools:
             return "❌ Error: Memory service is not available"
 
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -2061,7 +2064,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -2164,7 +2167,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -2270,7 +2273,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -2379,7 +2382,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -2546,7 +2549,7 @@ class Tools:
         
         
         # Set user headers in context variable (before any API calls)
-        headers = self._get_user_info_headers(__user__, None)
+        headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
             user_headers_context.set(headers)
             if self.valves.debug_print:
@@ -2709,7 +2712,7 @@ class Tools:
 #            return "❌ This migration is only supported on Neo4j backend."
 #
 #        # Set user headers in context variable (before any API calls)
-#        headers = self._get_user_info_headers(__user__, None)
+#        headers = get_user_info_headers(self.valves, __user__, None)
 #        if headers:
 #            user_headers_context.set(headers)
 #
