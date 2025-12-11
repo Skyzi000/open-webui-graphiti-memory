@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.5.2
+version: 0.5.3
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -1177,7 +1177,10 @@ class Tools:
 
                 # Progress notification
                 if __event_emitter__:
-                    progress_msg = f"🔄 メモリを移行中 {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}" if is_ja else f"🔄 Migrating memory {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}"
+                    if dry_run:
+                        progress_msg = f"🔍 [ドライラン] メモリを確認中 {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}" if is_ja else f"🔍 [Dry Run] Checking memory {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}"
+                    else:
+                        progress_msg = f"🔄 メモリを移行中 {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}" if is_ja else f"🔄 Migrating memory {idx}/{len(memories_to_migrate)}: [{memory_date}] {content_preview}"
                     await __event_emitter__({
                         "type": "status",
                         "data": {
