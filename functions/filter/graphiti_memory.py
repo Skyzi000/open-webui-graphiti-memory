@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.17.0
+version: 0.18.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -81,11 +81,16 @@ from graphiti_core.search.search_config import (
 # Note: FalkorDriver is imported lazily only when FalkorDB backend is selected
 # to avoid requiring the falkordb package when using Neo4j backend
 
-# Chats import may fail if running outside Open WebUI core (e.g., raw file import)
+# Chats and Models imports may fail if running outside Open WebUI core (e.g., raw file import)
 try:
     from open_webui.models.chats import Chats  # type: ignore
 except Exception:  # pragma: no cover - fallback for non-core environments
     Chats = None
+
+try:
+    from open_webui.models.models import Models  # type: ignore
+except Exception:  # pragma: no cover - fallback for non-core environments
+    Models = None
 
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
@@ -191,6 +196,31 @@ class MultiUserOpenAIEmbedder(OpenAIEmbedder):
     def client(self, value: AsyncOpenAI):
         """Store base client for future header injection"""
         self._base_client = value
+
+
+def get_model_display_name(model_id: str) -> Optional[str]:
+    """
+    Get human-readable model name from model ID.
+
+    Args:
+        model_id: The model ID to look up (e.g., "vii", "gpt-4")
+
+    Returns:
+        Human-readable model name if found, None otherwise.
+        Returns None if Models table is unavailable or model not found.
+    """
+    if Models is None or not model_id:
+        return None
+
+    try:
+        model = Models.get_model_by_id(model_id)
+        if model and model.name:
+            return model.name
+    except Exception:
+        pass
+
+    return None
+
 
 class Filter:
     """
@@ -335,7 +365,12 @@ class Filter:
             default=True,
             description="Use actual user name instead of 'User' label when saving conversations to memory. When enabled, episodes will be saved as '{user_name}: {message}' instead of 'User: {message}'.",
         )
-        
+
+        use_model_name_in_episode: bool = Field(
+            default=True,
+            description="Use actual model name instead of 'Assistant' label when saving conversations to memory. When enabled, episodes will be saved as '{model_name}: {message}' instead of 'Assistant: {message}'.",
+        )
+
         debug_print: bool = Field(
             default=False,
             description="Enable debug printing to console. When enabled, prints detailed information about search results, memory injection, and processing steps. Useful for troubleshooting.",
@@ -532,6 +567,7 @@ class Filter:
                 'memory_message_role',  # Message role doesn't affect Graphiti init
                 'forward_user_info_headers',  # Header forwarding doesn't affect Graphiti init
                 'use_user_name_in_episode',  # Episode formatting doesn't affect Graphiti init
+                'use_model_name_in_episode',  # Episode formatting doesn't affect Graphiti init
             }
         )
         # Sort keys for consistent hashing
@@ -4091,6 +4127,21 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 # This is the user message that triggered the previous_assistant response
                 user_before_previous_assistant = msg
                 break  # We found everything we need
+
+        # Enrich previous_assistant_message with model field from database if available
+        if previous_assistant_message and Chats is not None:
+            msg_id = previous_assistant_message.get("id")
+            if msg_id and chat_id and chat_id != "unknown":
+                try:
+                    db_message = Chats.get_message_by_id_and_message_id(chat_id, msg_id)
+                    if db_message and "model" in db_message:
+                        # Merge database fields (especially 'model') into the message
+                        previous_assistant_message = {**previous_assistant_message, "model": db_message["model"]}
+                        if self.valves.debug_print:
+                            print(f"Enriched previous_assistant with model from DB: {db_message.get('model')}")
+                except Exception as e:
+                    if self.valves.debug_print:
+                        print(f"Failed to enrich previous_assistant message from DB: {e}")
         
         # Get skip_save_regex pattern once for reuse
         skip_pattern = getattr(user_valves, "skip_save_regex", "")
@@ -4127,7 +4178,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
             else:
                 previous_assistant_content = self._get_content_from_message(previous_assistant_message)
                 if previous_assistant_content:
-                    messages_to_save.append(("previous_assistant", previous_assistant_content))
+                    messages_to_save.append(("previous_assistant", previous_assistant_content, previous_assistant_message))
         
         user_content_block = ""
         if user_valves.save_user_message and last_user_message:
@@ -4151,12 +4202,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
         
         if user_valves.save_user_message and last_user_message:
             if user_content_block:
-                messages_to_save.append(("user", user_content_block))
+                messages_to_save.append(("user", user_content_block, None))
         
         if user_valves.save_assistant_response and last_assistant_message:
             assistant_content = self._get_content_from_message(last_assistant_message)
             if assistant_content:
-                messages_to_save.append(("assistant", assistant_content))
+                messages_to_save.append(("assistant", assistant_content, last_assistant_message))
         
         if len(messages_to_save) == 0:
             return body
@@ -4167,7 +4218,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         messages_to_save.sort(key=lambda x: role_order.get(x[0], 99))
         
         episode_parts = []
-        for role, content in messages_to_save:
+        for role, content, message_obj in messages_to_save:
             if role == "user":
                 # Use actual user name if enabled, otherwise use "User"
                 if self.valves.use_user_name_in_episode and __user__.get('name'):
@@ -4175,7 +4226,32 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 else:
                     role_label = "User"
             elif role in ("assistant", "previous_assistant"):
-                role_label = "Assistant"
+                # Use actual model name if enabled, otherwise use "Assistant"
+                if self.valves.use_model_name_in_episode:
+                    # Try to get model ID from message object first (most accurate)
+                    model_id = message_obj.get("model") if message_obj else None
+
+                    # For current assistant response, fallback to current request model
+                    # For previous assistant response, don't fallback to avoid mislabeling
+                    if not model_id and role == "assistant":
+                        model_id = body.get("model")
+
+                    # Convert model ID to human-readable name
+                    model_name = get_model_display_name(model_id) if model_id else None
+
+                    # Debug output
+                    if self.valves.debug_print:
+                        print(f"[DEBUG] role={role}")
+                        print(f"[DEBUG] model_id: {model_id}")
+                        print(f"[DEBUG] model_name: {model_name}")
+
+                    # Fallback chain: model name -> model ID -> "Assistant"
+                    role_label = model_name or model_id or "Assistant"
+
+                    if self.valves.debug_print:
+                        print(f"[DEBUG] final role_label: {role_label}")
+                else:
+                    role_label = "Assistant"
             else:
                 role_label = role.capitalize()
             episode_parts.append(f"{role_label}: {content}")
