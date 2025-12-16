@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.5.4
+version: 0.5.5
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -734,6 +734,10 @@ class Tools:
         show_extracted_details: bool = Field(
             default=True,
             description="Show extracted entities and facts in status after adding memory or during migration. Set to False to reduce status message noise.",
+        )
+        episode_preview_length: int = Field(
+            default=500,
+            description="Maximum characters to show in episode content previews. Lower values reduce context usage.",
         )
         pass
 
@@ -1552,6 +1556,12 @@ class Tools:
 
             total_count = len(episodes)
 
+            # Get user's preview length preference
+            user_valves = self.UserValves.model_validate(
+                (__user__ or {}).get("valves", {})
+            )
+            preview_length = user_valves.episode_preview_length
+
             # Build result message
             result = f"🔍 Found {total_count} episodes matching '{query}':\n\n"
 
@@ -1563,9 +1573,9 @@ class Tools:
 
                 # Truncate content for preview
                 total_chars = len(content)
-                if total_chars > 150:
-                    content_preview = content[:150] + "..."
-                    truncation_info = f"(showing 150/{total_chars} chars)"
+                if total_chars > preview_length:
+                    content_preview = content[:preview_length] + "..."
+                    truncation_info = f"(showing {preview_length}/{total_chars} chars)"
                 else:
                     content_preview = content
                     truncation_info = None
@@ -1661,6 +1671,12 @@ class Tools:
             if not episodes:
                 return f"ℹ️ No episodes found at offset {offset}"
 
+            # Get user's preview length preference
+            user_valves = self.UserValves.model_validate(
+                (__user__ or {}).get("valves", {})
+            )
+            preview_length = user_valves.episode_preview_length
+
             # Build result message
             result = f"📅 Recent episodes ({len(episodes)}"
             if has_more_in_db:
@@ -1678,9 +1694,9 @@ class Tools:
 
                 # Truncate content for preview
                 total_chars = len(content)
-                if total_chars > 150:
-                    content_preview = content[:150] + "..."
-                    truncation_info = f"(showing 150/{total_chars} chars)"
+                if total_chars > preview_length:
+                    content_preview = content[:preview_length] + "..."
+                    truncation_info = f"(showing {preview_length}/{total_chars} chars)"
                 else:
                     content_preview = content
                     truncation_info = None
