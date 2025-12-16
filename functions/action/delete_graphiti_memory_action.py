@@ -4,7 +4,7 @@ description: Action button to search and delete an episode from Graphiti knowled
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.2.0
+version: 0.2.1
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cGF0aCBkPSJNOCA5aDN2MTZIOHptNiAwaDN2MTZoLTN6bTYgMGgzdjE2aC0zeiIgZmlsbD0iIzRjNGM0YyIvPgogIDxyZWN0IHg9IjYiIHk9IjYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIzIiByeD0iMSIgZmlsbD0iIzRjNGM0YyIvPgogIDxwYXRoIGQ9Ik0xMSA2VjRhMiAyIDAgMCAxIDItMmg2YTIgMiAwIDAgMSAyIDJ2MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwYXRoIGQ9Ik03IDloMTh2MThhMiAyIDAgMCAxLTIgMkg5YTIgMiAwIDAgMS0yLTJWOXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+
 
@@ -611,21 +611,39 @@ class Action:
 
         messages = body.get("messages", [])
 
-        # Find the last user message and assistant message pair
-        # Episodes are saved as "User: {user_msg}\n\n---\n\nAssistant: {assistant_msg}"
+        # The clicked message is always the last in the list
+        # (createMessagesList builds root -> clicked message)
+        if not messages:
+            if __event_emitter__ and user_valves.show_status:
+                msg = "❌ メッセージがありません" if is_ja else "❌ No messages"
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": msg, "done": True},
+                    }
+                )
+            return None
+
+        clicked_message = messages[-1]
+
+        # Find the user/assistant pair based on clicked message
         last_user_message = None
         last_assistant_message = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and last_assistant_message is None:
-                last_assistant_message = msg
-            elif msg.get("role") == "user" and last_user_message is None:
-                last_user_message = msg
-            if last_user_message and last_assistant_message:
-                break
 
-        if not last_assistant_message:
+        if clicked_message.get("role") == "assistant":
+            last_assistant_message = clicked_message
+            # Find the previous user message
+            for msg in reversed(messages[:-1]):
+                if msg.get("role") == "user":
+                    last_user_message = msg
+                    break
+        elif clicked_message.get("role") == "user":
+            last_user_message = clicked_message
+            # No assistant response for this user message yet
+
+        if not last_assistant_message and not last_user_message:
             if __event_emitter__ and user_valves.show_status:
-                msg = "❌ アシスタントメッセージが見つかりません" if is_ja else "❌ No assistant message found"
+                msg = "❌ 有効なメッセージが見つかりません" if is_ja else "❌ No valid message found"
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -636,7 +654,7 @@ class Action:
 
         # Extract content from user and assistant messages
         user_content = self._get_content_from_message(last_user_message) if last_user_message else ""
-        assistant_content = self._get_content_from_message(last_assistant_message)
+        assistant_content = self._get_content_from_message(last_assistant_message) if last_assistant_message else ""
 
         if self.valves.debug_print:
             print(f"=== Delete Action: Message Analysis ===")

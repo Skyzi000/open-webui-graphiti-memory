@@ -4,7 +4,7 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.0
+version: 0.3.1
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
 
@@ -578,19 +578,36 @@ class Action:
             return None
 
         messages = body.get("messages", [])
-        
-        # Find the last user message and last assistant message
+
+        # The clicked message is always the last in the list
+        # (createMessagesList builds root -> clicked message)
+        if not messages:
+            if __event_emitter__ and user_valves.show_status:
+                msg = "❌ メッセージがありません" if is_ja else "❌ No messages"
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": msg, "done": True},
+                    }
+                )
+            return None
+
+        clicked_message = messages[-1]
+
+        # Find the user/assistant pair based on clicked message
         last_user_message = None
         last_assistant_message = None
-        
-        for msg in reversed(messages):
-            if msg.get("role") == "user" and last_user_message is None:
-                last_user_message = msg
-            elif msg.get("role") == "assistant" and last_assistant_message is None:
-                last_assistant_message = msg
-            
-            if last_user_message and last_assistant_message:
-                break
+
+        if clicked_message.get("role") == "assistant":
+            last_assistant_message = clicked_message
+            # Find the previous user message
+            for msg in reversed(messages[:-1]):
+                if msg.get("role") == "user":
+                    last_user_message = msg
+                    break
+        elif clicked_message.get("role") == "user":
+            last_user_message = clicked_message
+            # No assistant response for this user message yet
 
         if __event_emitter__:
             # Get chat_id from metadata if available
