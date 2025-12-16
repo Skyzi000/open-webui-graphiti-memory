@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.5.3
+version: 0.5.4
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -785,8 +785,6 @@ class Tools:
 #        Important Notes:
 #        - For source="message": Content MUST follow "speaker: content" format for each line
 #        - For source="json": Content must be a valid JSON string (will be validated)
-#        
-#        Note: __user__ and __event_emitter__ are automatically injected by the system.
 #        """
 #        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
 #            return "❌ Error: Memory service is not available"
@@ -1358,8 +1356,6 @@ class Tools:
         :param limit: Maximum number of entities to return (default: 10, max: 100)
         :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
         :return: List of found entities with their details
-        
-        Note: __user__ and __event_emitter__ are automatically injected by the system.
         """
         
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
@@ -1439,8 +1435,6 @@ class Tools:
         :param limit: Maximum number of facts to return (default: 10, max: 100)
         :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
         :return: List of found facts with their details
-        
-        Note: __user__ and __event_emitter__ are automatically injected by the system.
         """
         
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
@@ -1507,7 +1501,7 @@ class Tools:
         self,
         query: str,
         limit: int = 10,
-        show_uuid: bool = False,
+        show_uuid: bool = True,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
@@ -1519,10 +1513,8 @@ class Tools:
 
         :param query: Search query to find episodes (e.g., "conversation about Python")
         :param limit: Maximum number of episodes to return (default: 10, max: 100)
-        :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        :param show_uuid: Whether to display UUID in search results (default: True). UUIDs can be used with get_episode_content to retrieve full content.
         :return: List of found episodes with their details
-
-        Note: __user__ and __event_emitter__ are automatically injected by the system.
         """
 
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
@@ -1570,19 +1562,25 @@ class Tools:
                 uuid = getattr(episode, 'uuid', 'N/A')
 
                 # Truncate content for preview
-                if len(content) > 150:
+                total_chars = len(content)
+                if total_chars > 150:
                     content_preview = content[:150] + "..."
+                    truncation_info = f"(showing 150/{total_chars} chars)"
                 else:
                     content_preview = content
+                    truncation_info = None
 
                 result += f"**{i}. {name}**\n"
                 result += f"   Content: {content_preview}\n"
+                if truncation_info:
+                    result += f"   {truncation_info}\n"
                 result += f"   Created: {created_at}\n"
                 if show_uuid:
                     result += f"   UUID: `{uuid}`\n"
                 result += "\n"
 
-            result += f"💡 To delete these episodes, use `search_and_delete_episodes` with the same query and limit."
+            result += "💡 Previews may be truncated. Use `get_episode_content(uuid=\"...\")` to retrieve full content before answering if details are needed.\n\n"
+            result += f"To delete these episodes, use `search_and_delete_episodes` with the same query and limit."
 
             return result
 
@@ -1596,7 +1594,7 @@ class Tools:
         self,
         limit: int = 10,
         offset: int = 0,
-        show_uuid: bool = False,
+        show_uuid: bool = True,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
@@ -1608,15 +1606,13 @@ class Tools:
 
         :param limit: Maximum number of episodes to return (default: 10, max: 100)
         :param offset: Number of episodes to skip for pagination (default: 0)
-        :param show_uuid: Whether to display UUID in results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        :param show_uuid: Whether to display UUID in results (default: True). UUIDs can be used with get_episode_content to retrieve full content.
         :return: List of recent episodes with their details
 
         Examples:
         - get_recent_episodes(limit=20) - Get the 20 most recent episodes
         - get_recent_episodes(limit=10, offset=10) - Get episodes 11-20 (pagination)
         - get_recent_episodes(limit=5, show_uuid=True) - Get 5 recent episodes with UUIDs
-
-        Note: __user__ and __event_emitter__ are automatically injected by the system.
         """
 
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
@@ -1681,25 +1677,32 @@ class Tools:
                 uuid = getattr(episode, 'uuid', 'N/A')
 
                 # Truncate content for preview
-                if len(content) > 150:
+                total_chars = len(content)
+                if total_chars > 150:
                     content_preview = content[:150] + "..."
+                    truncation_info = f"(showing 150/{total_chars} chars)"
                 else:
                     content_preview = content
+                    truncation_info = None
 
                 # Calculate actual position in full list
                 position = offset + i
 
                 result += f"**{position}. {name}**\n"
                 result += f"   Content: {content_preview}\n"
+                if truncation_info:
+                    result += f"   {truncation_info}\n"
                 result += f"   Time: {valid_at}\n"
                 result += f"   Source: {source}\n"
                 if show_uuid:
                     result += f"   UUID: `{uuid}`\n"
                 result += "\n"
 
+            result += "💡 Previews may be truncated. Use `get_episode_content(uuid=\"...\")` to retrieve full content before answering if details are needed.\n"
+
             # Add pagination hints
             if has_more_in_db:
-                result += f"💡 More episodes may be available. Use `offset={offset + len(episodes)}` to see the next page."
+                result += f"\n📄 More episodes may be available. Use `offset={offset + len(episodes)}` to see the next page."
 
             return result
 
