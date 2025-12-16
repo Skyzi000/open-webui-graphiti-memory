@@ -4,7 +4,7 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.1.3
+version: 0.2.0
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
 
@@ -51,6 +51,12 @@ from graphiti_core.nodes import EpisodeType
 from openai import AsyncOpenAI
 # Note: FalkorDriver is imported lazily only when FalkorDB backend is selected
 # to avoid requiring the falkordb package when using Neo4j backend
+
+# Chats import may fail if running outside Open WebUI core
+try:
+    from open_webui.models.chats import Chats  # type: ignore
+except Exception:
+    Chats = None
 
 # Context variable to store user-specific headers for each async request
 user_headers_context = contextvars.ContextVar('user_headers', default={})
@@ -496,14 +502,25 @@ class Action:
     def _get_content_from_message(self, message: dict) -> Optional[str]:
         """Extract text content from a message"""
         content = message.get("content")
-        
+
         if isinstance(content, list):
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
                     return item.get("text", "")
             return ""
-        
+
         return content if isinstance(content, str) else ""
+
+    def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
+        """Resolve chat title from Open WebUI Chats model."""
+        if Chats is None:
+            return None
+        if not chat_id or chat_id == "unknown":
+            return None
+        try:
+            return Chats.get_chat_title_by_id(str(chat_id))
+        except Exception:
+            return None
 
     async def action(
         self,
@@ -612,19 +629,30 @@ class Action:
                 
                 separator = "\n\n---\n\n"
                 episode_body = separator.join(episode_parts)
-                
+
                 # Get group_id
                 group_id = self._get_group_id(__user__)
-                
+
+                # Build episode name and source_description (matching Filter format)
+                user_turn_index = sum(1 for m in messages if m.get("role") == "user")
+                chat_title = self._get_chat_title(chat_id) or "Manual_Save"
+                episode_name = (
+                    f"{chat_title}_turn{user_turn_index}"
+                    if user_turn_index > 0
+                    else chat_title
+                )
+                timestamp_prefix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                source_description = f"{timestamp_prefix}_Chat_{chat_id}_turn{user_turn_index}_Manual"
+
                 # Add episode
                 if self.valves.add_episode_timeout > 0:
                     if group_id is not None:
                         add_results = await asyncio.wait_for(
                             self.graphiti.add_episode(
-                                name=f"Manual_Save_{chat_id}_{int(time.time())}",
+                                name=episode_name,
                                 episode_body=episode_body,
                                 source=EpisodeType.message,
-                                source_description="Manually saved via action button",
+                                source_description=source_description,
                                 reference_time=datetime.now(timezone.utc),
                                 group_id=group_id,
                                 update_communities=self.valves.update_communities,
@@ -634,10 +662,10 @@ class Action:
                     else:
                         add_results = await asyncio.wait_for(
                             self.graphiti.add_episode(
-                                name=f"Manual_Save_{chat_id}_{int(time.time())}",
+                                name=episode_name,
                                 episode_body=episode_body,
                                 source=EpisodeType.message,
-                                source_description="Manually saved via action button",
+                                source_description=source_description,
                                 reference_time=datetime.now(timezone.utc),
                                 update_communities=self.valves.update_communities,
                             ),
@@ -646,20 +674,20 @@ class Action:
                 else:
                     if group_id is not None:
                         add_results = await self.graphiti.add_episode(
-                            name=f"Manual_Save_{chat_id}_{int(time.time())}",
+                            name=episode_name,
                             episode_body=episode_body,
                             source=EpisodeType.message,
-                            source_description="Manually saved via action button",
+                            source_description=source_description,
                             reference_time=datetime.now(timezone.utc),
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
                         )
                     else:
                         add_results = await self.graphiti.add_episode(
-                            name=f"Manual_Save_{chat_id}_{int(time.time())}",
+                            name=episode_name,
                             episode_body=episode_body,
                             source=EpisodeType.message,
-                            source_description="Manually saved via action button",
+                            source_description=source_description,
                             reference_time=datetime.now(timezone.utc),
                             update_communities=self.valves.update_communities,
                         )
