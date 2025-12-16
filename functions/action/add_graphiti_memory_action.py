@@ -4,7 +4,7 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.2.0
+version: 0.3.0
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
 
@@ -278,6 +278,10 @@ class Action:
             default=True,
             description="Save assistant responses as memories.",
         )
+        ui_language: str = Field(
+            default="en",
+            description="Language for UI labels and status messages: 'en' (English) or 'ja' (Japanese)",
+        )
         
 
     def __init__(self):
@@ -522,6 +526,20 @@ class Action:
         except Exception:
             return None
 
+    def _is_japanese_preferred(self, user_valves: "Action.UserValves") -> bool:
+        """
+        Check if user prefers Japanese language based on UserValves settings.
+
+        Args:
+            user_valves: UserValves object with ui_language setting
+
+        Returns:
+            True if user prefers Japanese (ja), False otherwise (default: English)
+        """
+        if hasattr(user_valves, 'ui_language'):
+            return user_valves.ui_language.lower() == 'ja'
+        return False
+
     async def action(
         self,
         body: dict,
@@ -532,27 +550,29 @@ class Action:
         print(f"action:{__name__}")
 
         # Get user valves
-        user_valves = __user__.get("valves") if __user__ else None
-        if not user_valves:
-            user_valves = self.UserValves()
-        
+        user_valves = self.UserValves.model_validate((__user__ or {}).get("valves", {}))
+
+        is_ja = self._is_japanese_preferred(user_valves)
+
         # Check if Graphiti is initialized
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ Graphitiが初期化されていません" if is_ja else "❌ Graphiti not initialized"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ Graphiti not initialized", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
 
         if __user__ is None:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ ユーザー情報が利用できません" if is_ja else "❌ User information not available"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ User information not available", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
@@ -584,10 +604,11 @@ class Action:
                     print(f"Set user headers in context: {list(headers.keys())}")
 
             if user_valves.show_status:
+                msg = "✍️ Graphitiメモリに手動保存中..." if is_ja else "✍️ Manually saving to Graphiti memory..."
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "✍️ Manually saving to Graphiti memory...", "done": False},
+                        "data": {"description": msg, "done": False},
                     }
                 )
 
@@ -607,10 +628,11 @@ class Action:
                 
                 if len(messages_to_save) == 0:
                     if user_valves.show_status:
+                        msg = "ℹ️ 保存するメッセージがありません" if is_ja else "ℹ️ No messages to save"
                         await __event_emitter__(
                             {
                                 "type": "status",
-                                "data": {"description": "ℹ️ No messages to save", "done": True},
+                                "data": {"description": msg, "done": True},
                             }
                         )
                     return None
@@ -701,17 +723,19 @@ class Action:
                 if user_valves.show_status and add_results:
                     # Show all Facts
                     if add_results.edges:
+                        fact_label = "ファクト" if is_ja else "Fact"
                         for idx, edge in enumerate(add_results.edges, 1):
                             emoji = "🔚" if edge.invalid_at else "🔛"
                             await __event_emitter__(
                                 {
                                     "type": "status",
-                                    "data": {"description": f"{emoji} Fact {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
+                                    "data": {"description": f"{emoji} {fact_label} {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
                                 }
                             )
-                    
+
                     # Show all entities
                     if add_results.nodes:
+                        entity_label = "エンティティ" if is_ja else "Entity"
                         for idx, node in enumerate(add_results.nodes, 1):
                             entity_display = f"{node.name}"
                             if hasattr(node, 'summary') and node.summary:
@@ -719,26 +743,41 @@ class Action:
                             await __event_emitter__(
                                 {
                                     "type": "status",
-                                    "data": {"description": f"👤 Entity {idx}/{len(add_results.nodes)}: {entity_display}", "done": False},
+                                    "data": {"description": f"👤 {entity_label} {idx}/{len(add_results.nodes)}: {entity_display}", "done": False},
                                 }
                             )
                 
                 # Final success status
                 if user_valves.show_status:
-                    status_parts = ["✅ Added to Graphiti memory"]
-                    if add_results:
-                        detail_parts = []
-                        if add_results.nodes:
-                            detail_parts.append(f"{len(add_results.nodes)} entit{'ies' if len(add_results.nodes) != 1 else 'y'}")
-                        if add_results.edges:
-                            detail_parts.append(f"{len(add_results.edges)} relation{'s' if len(add_results.edges) != 1 else ''}")
-                        if detail_parts:
-                            status_msg = " - ".join(status_parts + [" and ".join(detail_parts) + " extracted"])
+                    if is_ja:
+                        status_base = "✅ Graphitiメモリに追加しました"
+                        if add_results:
+                            detail_parts = []
+                            if add_results.nodes:
+                                detail_parts.append(f"{len(add_results.nodes)}件のエンティティ")
+                            if add_results.edges:
+                                detail_parts.append(f"{len(add_results.edges)}件のファクト")
+                            if detail_parts:
+                                status_msg = status_base + " - " + "と".join(detail_parts) + "を抽出"
+                            else:
+                                status_msg = status_base
                         else:
-                            status_msg = status_parts[0]
+                            status_msg = status_base
                     else:
-                        status_msg = status_parts[0]
-                    
+                        status_base = "✅ Added to Graphiti memory"
+                        if add_results:
+                            detail_parts = []
+                            if add_results.nodes:
+                                detail_parts.append(f"{len(add_results.nodes)} entit{'ies' if len(add_results.nodes) != 1 else 'y'}")
+                            if add_results.edges:
+                                detail_parts.append(f"{len(add_results.edges)} fact{'s' if len(add_results.edges) != 1 else ''}")
+                            if detail_parts:
+                                status_msg = status_base + " - " + " and ".join(detail_parts) + " extracted"
+                            else:
+                                status_msg = status_base
+                        else:
+                            status_msg = status_base
+
                     await __event_emitter__(
                         {
                             "type": "status",
@@ -749,27 +788,28 @@ class Action:
             except asyncio.TimeoutError:
                 print(f"Timeout adding to memory after {self.valves.add_episode_timeout}s")
                 if user_valves.show_status:
+                    msg = "⚠️ メモリ保存がタイムアウトしました" if is_ja else "⚠️ Memory save timed out"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "⚠️ Memory save timed out", "done": True},
+                            "data": {"description": msg, "done": True},
                         }
                     )
             except Exception as e:
                 error_type = type(e).__name__
                 error_msg = str(e)
-                
+
                 if "ValidationError" in error_type:
                     print(f"Graphiti LLM response validation error: {error_msg}")
-                    user_msg = "Graphiti: LLM response format error"
+                    user_msg = "Graphiti: LLMレスポンス形式エラー" if is_ja else "Graphiti: LLM response format error"
                 elif "ConnectionError" in error_type or "timeout" in error_msg.lower():
                     print(f"Graphiti connection error: {error_msg}")
-                    user_msg = "Graphiti: Connection error"
+                    user_msg = "Graphiti: 接続エラー" if is_ja else "Graphiti: Connection error"
                 else:
                     print(f"Graphiti error: {e}")
-                    user_msg = f"Graphiti: Error ({error_type})"
+                    user_msg = f"Graphiti: エラー ({error_type})" if is_ja else f"Graphiti: Error ({error_type})"
                     traceback.print_exc()
-                
+
                 if user_valves.show_status:
                     await __event_emitter__(
                         {

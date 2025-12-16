@@ -4,7 +4,7 @@ description: Action button to search and delete an episode from Graphiti knowled
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.1.0
+version: 0.2.0
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cGF0aCBkPSJNOCA5aDN2MTZIOHptNiAwaDN2MTZoLTN6bTYgMGgzdjE2aC0zeiIgZmlsbD0iIzRjNGM0YyIvPgogIDxyZWN0IHg9IjYiIHk9IjYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIzIiByeD0iMSIgZmlsbD0iIzRjNGM0YyIvPgogIDxwYXRoIGQ9Ik0xMSA2VjRhMiAyIDAgMCAxIDItMmg2YTIgMiAwIDAgMSAyIDJ2MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwYXRoIGQ9Ik03IDloMTh2MThhMiAyIDAgMCAxLTIgMkg5YTIgMiAwIDAgMS0yLTJWOXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+
 
@@ -261,6 +261,10 @@ class Action:
         confirmation_timeout: int = Field(
             default=60,
             description="Timeout in seconds for confirmation dialog.",
+        )
+        ui_language: str = Field(
+            default="en",
+            description="Language for UI labels and status messages: 'en' (English) or 'ja' (Japanese)",
         )
         pass
 
@@ -545,6 +549,20 @@ class Action:
             # Best speed/quality tradeoff for most use cases
             return COMBINED_HYBRID_SEARCH_RRF
 
+    def _is_japanese_preferred(self, user_valves: "Action.UserValves") -> bool:
+        """
+        Check if user prefers Japanese language based on UserValves settings.
+
+        Args:
+            user_valves: UserValves object with ui_language setting
+
+        Returns:
+            True if user prefers Japanese (ja), False otherwise (default: English)
+        """
+        if hasattr(user_valves, 'ui_language'):
+            return user_valves.ui_language.lower() == 'ja'
+        return False
+
     async def action(
         self,
         body: dict,
@@ -556,32 +574,37 @@ class Action:
 
         user_valves = self.UserValves.model_validate((__user__ or {}).get("valves", {}))
 
+        is_ja = self._is_japanese_preferred(user_valves)
+
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ Graphitiが初期化されていません" if is_ja else "❌ Graphiti not initialized"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ Graphiti not initialized", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
 
         if __user__ is None:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ ユーザー情報が利用できません" if is_ja else "❌ User information not available"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ User information not available", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
 
         if __event_call__ is None:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ 確認ダイアログが利用できません" if is_ja else "❌ Confirmation dialog not available"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ Confirmation dialog not available", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
@@ -602,10 +625,11 @@ class Action:
 
         if not last_assistant_message:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ アシスタントメッセージが見つかりません" if is_ja else "❌ No assistant message found"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ No assistant message found", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
@@ -622,10 +646,11 @@ class Action:
 
         if not user_content and not assistant_content:
             if __event_emitter__ and user_valves.show_status:
+                msg = "❌ メッセージ内容が空です" if is_ja else "❌ Message content is empty"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "❌ Message content is empty", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
             return None
@@ -638,10 +663,11 @@ class Action:
             user_headers_context.set(headers)
 
         if __event_emitter__ and user_valves.show_status:
+            msg = "🔍 関連エピソードを検索中..." if is_ja else "🔍 Searching for related episodes..."
             await __event_emitter__(
                 {
                     "type": "status",
-                    "data": {"description": "🔍 Searching for related episodes...", "done": False},
+                    "data": {"description": msg, "done": False},
                 }
             )
 
@@ -697,10 +723,11 @@ class Action:
 
             if not candidates:
                 if __event_emitter__ and user_valves.show_status:
+                    msg = "ℹ️ 関連エピソードが見つかりませんでした" if is_ja else "ℹ️ No related episodes found"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "ℹ️ No related episodes found", "done": True},
+                            "data": {"description": msg, "done": True},
                         }
                     )
                 return None
@@ -741,19 +768,31 @@ class Action:
             # Build confirmation message
             content_preview = best_match.content[:200] + "..." if len(best_match.content) > 200 else best_match.content
 
-            confirmation_message = f"""Found episode (similarity: {best_score:.1%}):
+            if is_ja:
+                confirmation_message = f"""エピソードが見つかりました (一致度: {best_score:.1%}):
+
+{best_match.name}:
+{content_preview}
+
+---
+この操作は取り消せません。"""
+                confirmation_title = "🗑️ メモリからエピソードを削除"
+            else:
+                confirmation_message = f"""Found episode (similarity: {best_score:.1%}):
 
 {best_match.name}:
 {content_preview}
 
 ---
 This operation cannot be undone."""
+                confirmation_title = "🗑️ Delete Episode from Memory"
 
             if __event_emitter__ and user_valves.show_status:
+                msg = f"⏳ エピソードが見つかりました (一致度: {best_score:.0%}). 確認待ち..." if is_ja else f"⏳ Found episode (similarity: {best_score:.0%}). Waiting for confirmation..."
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"⏳ Found episode (similarity: {best_score:.0%}). Waiting for confirmation...", "done": False},
+                        "data": {"description": msg, "done": False},
                     }
                 )
 
@@ -763,7 +802,7 @@ This operation cannot be undone."""
                     {
                         "type": "confirmation",
                         "data": {
-                            "title": "🗑️ Delete Episode from Memory",
+                            "title": confirmation_title,
                             "message": confirmation_message,
                         },
                     }
@@ -775,10 +814,11 @@ This operation cannot be undone."""
                     if self.valves.debug_print:
                         print("User cancelled deletion")
                     if __event_emitter__ and user_valves.show_status:
+                        msg = "🚫 削除がキャンセルされました" if is_ja else "🚫 Deletion cancelled"
                         await __event_emitter__(
                             {
                                 "type": "status",
-                                "data": {"description": "🚫 Deletion cancelled", "done": True},
+                                "data": {"description": msg, "done": True},
                             }
                         )
                     return None
@@ -787,10 +827,11 @@ This operation cannot be undone."""
                 if self.valves.debug_print:
                     print(f"Confirmation timed out after {user_valves.confirmation_timeout}s")
                 if __event_emitter__ and user_valves.show_status:
+                    msg = "⏰ 確認がタイムアウトしました" if is_ja else "⏰ Confirmation timed out"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "⏰ Confirmation timed out", "done": True},
+                            "data": {"description": msg, "done": True},
                         }
                     )
                 return None
@@ -800,10 +841,11 @@ This operation cannot be undone."""
                 print(f"=== Deleting episode ===")
 
             if __event_emitter__ and user_valves.show_status:
+                msg = "🗑️ エピソードを削除中..." if is_ja else "🗑️ Deleting episode..."
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "🗑️ Deleting episode...", "done": False},
+                        "data": {"description": msg, "done": False},
                     }
                 )
 
@@ -823,20 +865,22 @@ This operation cannot be undone."""
                 if self.valves.debug_print:
                     print(f"=== Episode deleted ===")
                 if __event_emitter__ and user_valves.show_status:
+                    msg = "✅ エピソードを削除しました" if is_ja else "✅ Episode deleted"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "✅ Episode deleted", "done": True},
+                            "data": {"description": msg, "done": True},
                         }
                     )
             else:
                 if self.valves.debug_print:
                     print(f"=== Failed to delete episode ===")
                 if __event_emitter__ and user_valves.show_status:
+                    msg = "❌ エピソードの削除に失敗しました" if is_ja else "❌ Failed to delete episode"
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "❌ Failed to delete episode", "done": True},
+                            "data": {"description": msg, "done": True},
                         }
                     )
 
@@ -847,10 +891,11 @@ This operation cannot be undone."""
                 traceback.print_exc()
 
             if __event_emitter__ and user_valves.show_status:
+                msg = f"❌ エラー: {error_type}" if is_ja else f"❌ Error: {error_type}"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"❌ Error: {error_type}", "done": True},
+                        "data": {"description": msg, "done": True},
                     }
                 )
 
