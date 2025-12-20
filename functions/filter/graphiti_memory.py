@@ -3709,7 +3709,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 return body
 
         # Check if this is a temporary chat (chat_id starts with 'local:')
-        chat_id_for_temp_check = __metadata__.get('chat_id', '') if __metadata__ else ''
+        chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
         if user_valves.auto_disable_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
             if self.valves.debug_print:
                 print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory search.")
@@ -4086,7 +4086,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 return body
 
         # Check if this is a temporary chat (chat_id starts with 'local:')
-        chat_id_for_temp_check = __metadata__.get('chat_id', '') if __metadata__ else ''
+        chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
         if user_valves.auto_disable_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
             if self.valves.debug_print:
                 print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory storage.")
