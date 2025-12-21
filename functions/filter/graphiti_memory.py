@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.18.0
+version: 0.19.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -521,6 +521,14 @@ class Filter:
         enable_delete_command: bool = Field(
             default=True,
             description="Enable the /graphiti-delete-entity command for deleting entities directly from the Filter (no AI/Tool dependency). When enabled, clicking the delete button in entity citations sends a command that the Filter processes directly.",
+        )
+        auto_disable_search_on_temporary_chat: bool = Field(
+            default=True,
+            description="Automatically disable memory search (inlet) for temporary chats. Temporary chats are identified by chat_id starting with 'local:'.",
+        )
+        auto_disable_save_on_temporary_chat: bool = Field(
+            default=True,
+            description="Automatically disable memory storage (outlet) for temporary chats. Temporary chats are identified by chat_id starting with 'local:'.",
         )
 
     def __init__(self):
@@ -3696,14 +3704,21 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         __user__=__user__,
                         __metadata__=__metadata__,
                     )
-        
+
         # Check if user has disabled the feature
         if __user__:
             if not user_valves.enabled:
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
-        
+
+        # Check if this is a temporary chat (chat_id starts with 'local:')
+        chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
+        if user_valves.auto_disable_search_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
+            if self.valves.debug_print:
+                print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory search.")
+            return body
+
         # Check if graphiti is initialized, retry if not
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
@@ -4073,13 +4088,20 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 if self.valves.debug_print:
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
-        
+
+        # Check if this is a temporary chat (chat_id starts with 'local:')
+        chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
+        if user_valves.auto_disable_save_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
+            if self.valves.debug_print:
+                print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory storage.")
+            return body
+
         # Check if graphiti is initialized, retry if not
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
             if self.valves.debug_print:
                 print("Graphiti initialization failed. Skipping memory addition.")
             return body
-            
+
         if __user__ is None:
             if self.valves.debug_print:
                 print("User information is not available. Skipping memory addition.")
