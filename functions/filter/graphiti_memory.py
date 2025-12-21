@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.19.1
+version: 0.19.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -249,6 +249,10 @@ class Filter:
     6. Extract and store new memories in graph database
     """
     class Valves(BaseModel):
+        priority: int = Field(
+            default=0,
+            description="Priority level for the filter operations.",
+        )
         llm_client_type: str = Field(
             default="openai",
             description="Type of LLM client to use: 'openai' for OpenAI client, 'generic' for OpenAI-compatible generic client. Try both to see which works better with your LLM provider.",
