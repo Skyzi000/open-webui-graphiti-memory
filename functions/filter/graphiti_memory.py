@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.19.2
+version: 0.20.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -501,10 +501,20 @@ class Filter:
             default=True,
             description="Inject facts (EntityEdge/relationships) from memory search results.",
         )
-        
+        max_inject_facts: int = Field(
+            default=10,
+            ge=1,
+            description="Maximum number of facts to inject.",
+        )
+
         inject_entities: bool = Field(
             default=True,
             description="Inject entities (EntityNode summaries) from memory search results.",
+        )
+        max_inject_entities: int = Field(
+            default=10,
+            ge=1,
+            description="Maximum number of entities to inject.",
         )
         search_history_turns: int = Field(
             default=3,
@@ -1301,18 +1311,23 @@ class Filter:
         
         return group_id
     
-    def _get_search_config(self):
+    def _get_search_config(self, user_valves: "Filter.UserValves"):
         """
         Get search configuration based on the configured search strategy.
-        
+
+        Args:
+            user_valves: User valve settings containing max_inject_facts and max_inject_entities
+
         Returns:
-            SearchConfig: Configured search strategy
+            SearchConfig: Configured search strategy with appropriate limit
         """
         strategy = self.valves.search_strategy.lower()
-        
+        # Use max of facts/entities limits for search, then slice results later
+        search_limit = max(user_valves.max_inject_facts, user_valves.max_inject_entities)
+
         if strategy == "fast":
             # BM25 only - fastest, no embedding calls
-            return SearchConfig(
+            base_config = SearchConfig(
                 edge_config=EdgeSearchConfig(
                     search_methods=[EdgeSearchMethod.bm25],
                     reranker=EdgeReranker.rrf,
@@ -1328,11 +1343,13 @@ class Filter:
             )
         elif strategy == "quality":
             # Cross-encoder - highest quality, slowest
-            return COMBINED_HYBRID_SEARCH_CROSS_ENCODER
+            base_config = COMBINED_HYBRID_SEARCH_CROSS_ENCODER
         else:
             # Default: balanced (BM25 + Cosine Similarity + RRF)
             # Best speed/quality tradeoff for most use cases
-            return COMBINED_HYBRID_SEARCH_RRF
+            base_config = COMBINED_HYBRID_SEARCH_RRF
+
+        return base_config.model_copy(update={"limit": search_limit})
     
     def _get_content_from_message(self, message: dict) -> Optional[str]:
         """
@@ -2901,20 +2918,14 @@ body {
         entity_lookup: dict[str, dict[str, str]],
         nodes: list[Any] | None,
         edges: list[Any] | None,
-        max_nodes: int = 14,
-        max_edges: int = 24,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not entity_lookup:
             return [], []
 
-        edge_count = len(edges or [])
-        dynamic_node_cap = 30 if edge_count <= 12 else max_nodes
-        dynamic_edge_cap = 60 if edge_count <= 12 else max_edges
-
         selected: dict[str, dict[str, Any]] = {}
 
         def add_node(node_uuid: Any, kind: str) -> None:
-            if not node_uuid or len(selected) >= dynamic_node_cap:
+            if not node_uuid:
                 return
             uuid_str = str(node_uuid)
             if uuid_str in selected:
@@ -2930,8 +2941,6 @@ body {
         if nodes:
             for node in nodes:
                 add_node(getattr(node, "uuid", None), "spotlight")
-                if len(selected) >= dynamic_node_cap:
-                    break
 
         if edges:
             for edge in edges:
@@ -2945,8 +2954,6 @@ body {
         links: list[dict[str, Any]] = []
         if edges:
             for edge in edges:
-                if len(links) >= dynamic_edge_cap:
-                    break
                 src = getattr(edge, "source_node_uuid", None)
                 tgt = getattr(edge, "target_node_uuid", None)
                 if not src or not tgt:
@@ -2975,10 +2982,6 @@ body {
             if node["id"] in connected_ids or node["kind"] == "spotlight"
         ]
 
-        if not links and nodes_payload:
-            # Keep at most 8 spotlight-only nodes to prevent excessive spread when no edges
-            nodes_payload = nodes_payload[:8]
-
         return nodes_payload, links
 
     def _render_overview_graph_html(
@@ -2986,6 +2989,8 @@ body {
         nodes_payload: list[dict[str, Any]],
         links_payload: list[dict[str, Any]],
         is_japanese: bool = False,
+        actual_injected_entities: int | None = None,
+        actual_injected_facts: int | None = None,
     ) -> str:
         if not nodes_payload:
             empty_text = "グラフの概要がありません。" if is_japanese else "No graph overview available."
@@ -2994,15 +2999,21 @@ body {
                 min_height=200,
             )
 
+        # Use actual injection counts if provided, otherwise fall back to graph payload counts
         node_count = len(nodes_payload)
-        edge_count = len(links_payload)
-        injected_count = sum(1 for node in nodes_payload if node.get("kind") == "spotlight")
+        if actual_injected_entities is not None and actual_injected_facts is not None:
+            injected_count = actual_injected_entities
+            fact_count = actual_injected_facts
+        else:
+            injected_count = sum(1 for node in nodes_payload if node.get("kind") == "spotlight")
+            fact_count = len(links_payload)
+
         if is_japanese:
             entity_word = "エンティティ"
             fact_word = "ファクト"
-            chip_text = f"{node_count}件の{entity_word}（内{injected_count}件が注入済み） · {edge_count}件の{fact_word}"
+            chip_text = f"{node_count}件の{entity_word}（内{injected_count}件が注入済み） · {fact_count}件の{fact_word}"
         else:
-            chip_text = f"{node_count} entit{'ies' if node_count != 1 else 'y'} ({injected_count} injected) · {edge_count} fact{'s' if edge_count != 1 else ''}"
+            chip_text = f"{node_count} entit{'ies' if node_count != 1 else 'y'} ({injected_count} injected) · {fact_count} fact{'s' if fact_count != 1 else ''}"
         
         if is_japanese:
             injected_label = "注入済みエンティティ"
@@ -3561,6 +3572,8 @@ window.addEventListener('resize', renderGraph, { passive: true });
         nodes: list[Any] | None,
         edges: list[Any] | None,
         is_japanese: bool = False,
+        actual_injected_entities: int | None = None,
+        actual_injected_facts: int | None = None,
     ) -> Optional[dict]:
         nodes_payload, links_payload = self._build_overview_graph_data(
             entity_lookup,
@@ -3570,7 +3583,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
         if not nodes_payload:
             return None
 
-        overview_html = self._render_overview_graph_html(nodes_payload, links_payload, is_japanese=is_japanese)
+        overview_html = self._render_overview_graph_html(
+            nodes_payload,
+            links_payload,
+            is_japanese=is_japanese,
+            actual_injected_entities=actual_injected_entities,
+            actual_injected_facts=actual_injected_facts,
+        )
         source_id = self.valves.citation_source_id or "graphiti-memory"
         source_name = self.valves.citation_source_name or "Graphiti Memory"
         metadata: dict[str, Any] = {
@@ -3716,6 +3735,12 @@ window.addEventListener('resize', renderGraph, { passive: true });
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
 
+        # Check if any injection is enabled - skip search entirely if nothing will be injected
+        if not user_valves.inject_facts and not user_valves.inject_entities:
+            if self.valves.debug_print:
+                print("Both inject_facts and inject_entities are disabled. Skipping memory search.")
+            return body
+
         # Check if this is a temporary chat (chat_id starts with 'local:')
         chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
         if user_valves.auto_disable_search_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
@@ -3797,10 +3822,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 print(f"Search query truncated from {pre_trunc_length} to {len(sanitized_query)} characters")
         
         # Get search configuration based on strategy
-        search_config = self._get_search_config()
-        
+        search_config = self._get_search_config(user_valves)
+
         if self.valves.debug_print:
-            print(f"Using search strategy: {self.valves.search_strategy}")
+            print(f"Using search strategy: {self.valves.search_strategy}, limit: {max(user_valves.max_inject_facts, user_valves.max_inject_entities)}")
         
         if user_valves.show_status:
             is_ja = self._is_japanese_preferred(user_valves)
@@ -3890,12 +3915,22 @@ window.addEventListener('resize', renderGraph, { passive: true });
         entity_lookup = await self._build_entity_lookup(results.nodes, results.edges)
         entity_connections = self._build_entity_connections(results.edges, entity_lookup)
 
+        # Pre-calculate slices and actual injection counts for overview citation
+        edges_to_inject = results.edges[:user_valves.max_inject_facts] if user_valves.inject_facts else []
+        nodes_to_inject = results.nodes[:user_valves.max_inject_entities] if user_valves.inject_entities else []
+        # Facts are always injected, entities only if name and summary exist
+        actual_injected_facts = len(edges_to_inject)
+        actual_injected_entities = sum(1 for node in nodes_to_inject if getattr(node, 'name', None) and getattr(node, 'summary', None))
+
+        # Emit overview citation first (so it appears at the top)
         if user_valves.show_citation:
             overview_citation = self._build_overview_citation_event(
                 entity_lookup=entity_lookup,
-                nodes=results.nodes,
-                edges=results.edges,
+                nodes=nodes_to_inject,
+                edges=edges_to_inject,
                 is_japanese=self._is_japanese_preferred(user_valves),
+                actual_injected_entities=actual_injected_entities,
+                actual_injected_facts=actual_injected_facts,
             )
             if overview_citation:
                 await self._queue_citation_event(
@@ -3906,10 +3941,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
                     __metadata__,
                     __id__,
                 )
-        
+
         # Process EntityEdge results (relations/facts) only if enabled
         if user_valves.inject_facts:
-            for idx, result in enumerate(results.edges, 1):
+            for idx, result in enumerate(edges_to_inject, 1):
                 if self.valves.debug_print:
                     print(f'Edge UUID: {result.uuid}')
                     print(f'Fact({result.name}): {result.fact}')
@@ -3919,13 +3954,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         print(f'Valid until: {result.invalid_at}')
 
                 facts.append((result.fact, result.valid_at, result.invalid_at, result.name))
-                
+
                 # Emit citation for each fact found when citations are enabled
                 if user_valves.show_citation:
                     fact_citation = self._build_fact_citation_event(
                         result,
                         idx,
-                        len(results.edges),
+                        len(edges_to_inject),
                         entity_lookup,
                         use_rich_html=user_valves.rich_html_citations,
                         include_parameters=user_valves.show_citation_parameters,
@@ -3940,7 +3975,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             __metadata__,
                             __id__,
                         )
-                
+
                 if self.valves.debug_print:
                     print('---')
         else:
@@ -3949,21 +3984,21 @@ window.addEventListener('resize', renderGraph, { passive: true });
         
         # Process EntityNode results (entities with summaries) only if enabled
         if user_valves.inject_entities:
-            for idx, result in enumerate(results.nodes, 1):
+            for idx, result in enumerate(nodes_to_inject, 1):
                 if self.valves.debug_print:
                     print(f'Node UUID: {result.uuid}')
                     print(f'Entity({result.name}): {result.summary}')
-                
+
                 # Store entity information
                 if result.name and result.summary:
                     entities[result.name] = result.summary
-                    
+
                     # Emit citation for each entity found when citations are enabled
                     if user_valves.show_citation:
                         entity_citation = self._build_entity_citation_event(
                             result,
                             idx,
-                            len(results.nodes),
+                            len(nodes_to_inject),
                             entity_lookup,
                             entity_connections,
                             use_rich_html=user_valves.rich_html_citations,
@@ -3979,7 +4014,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                                 __metadata__,
                                 __id__,
                             )
-                
+
                 if self.valves.debug_print:
                     print('---')
         else:
