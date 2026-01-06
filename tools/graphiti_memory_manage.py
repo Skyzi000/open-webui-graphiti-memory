@@ -1598,7 +1598,7 @@ class Tools:
         :param limit: Maximum results (default: 10, max: 100)
         :param show_uuid: Show UUIDs for manual deletion (default: False)
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: Found facts with source/target entities and validity period
+        :return: Found facts with validity period
         """
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
