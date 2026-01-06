@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.5.5
+version: 0.6.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -63,6 +63,41 @@ from openai import AsyncOpenAI
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
 user_headers_context = contextvars.ContextVar('user_headers', default={})
+
+
+def _normalize_group_suffix(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    return value.strip()
+
+
+def _sanitize_group_suffix(value: str) -> str:
+    if value == "":
+        return ""
+    return re.sub(r'[^a-zA-Z0-9_-]', '_', value)
+
+
+def _parse_allowed_group_suffixes(raw: Optional[str]) -> tuple[bool, bool, List[str]]:
+    normalized = _normalize_group_suffix(raw)
+    if not normalized:
+        return False, False, []
+
+    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    if not parts:
+        return False, False, []
+
+    if any(part == "*" for part in parts):
+        return True, True, []
+
+    allowed = [_sanitize_group_suffix(part) for part in parts]
+    deduped = list(dict.fromkeys(allowed))
+    return True, False, deduped
+
+
+def _format_allowed_group_suffixes(allow_all: bool, allowed: List[str]) -> List[str]:
+    if allow_all:
+        return ["*"]
+    return allowed
 
 
 class MultiUserOpenAIClient(OpenAIClient):
@@ -415,6 +450,76 @@ class GraphitiHelper:
         group_id = re.sub(r'[^a-zA-Z0-9_-]', '_', group_id)
         
         return group_id
+
+    def get_group_id_with_suffix(
+        self,
+        user: dict,
+        suffix: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Generate group_id with optional suffix, respecting per-user suffix rules.
+
+        Args:
+            user: User dictionary containing 'id', 'email', 'name', and optional 'valves'
+            suffix: Optional suffix string. None uses default_group_suffix. "" means no suffix.
+
+        Returns:
+            Tuple of (group_id, error_message). error_message is None if valid.
+        """
+        base_group_id = self.get_group_id(user)
+        if base_group_id is None:
+            return None, None
+
+        user_valves = self.tools.UserValves.model_validate(
+            (user or {}).get("valves", {})
+        )
+
+        default_suffix = _sanitize_group_suffix(
+            _normalize_group_suffix(user_valves.default_group_suffix)
+        )
+
+        suffix_feature_enabled, allow_all, allowed_suffixes = _parse_allowed_group_suffixes(
+            user_valves.allowed_group_suffixes
+        )
+        allowed_display = _format_allowed_group_suffixes(allow_all, allowed_suffixes)
+
+        suffix_explicit = suffix is not None
+        if suffix_explicit:
+            if not isinstance(suffix, str):
+                return None, (
+                    "❌ Error: group_suffix must be a string or null. "
+                    f"Allowed suffixes: {allowed_display}"
+                )
+
+            normalized_suffix = _normalize_group_suffix(suffix)
+            sanitized_suffix = _sanitize_group_suffix(normalized_suffix)
+
+            if sanitized_suffix == "":
+                if not user_valves.allowed_group_suffix_empty:
+                    return None, (
+                        "❌ Error: empty group_suffix is not allowed. "
+                        "Set allowed_group_suffix_empty=true to permit empty suffixes. "
+                        f"Allowed suffixes: {allowed_display}"
+                    )
+            else:
+                if not suffix_feature_enabled:
+                    return None, (
+                        "❌ Error: group_suffix is disabled because allowed_group_suffixes is empty. "
+                        "Do not specify the group_suffix parameter. "
+                        "Allowed suffixes: []"
+                    )
+                if not allow_all and sanitized_suffix not in allowed_suffixes:
+                    return None, (
+                        f"❌ Error: group_suffix '{sanitized_suffix}' is not allowed. "
+                        f"Allowed suffixes: {allowed_display}"
+                    )
+        else:
+            sanitized_suffix = default_suffix
+
+        if sanitized_suffix:
+            return f"{base_group_id}{sanitized_suffix}", None
+
+        return base_group_id, None
     
     def is_japanese_preferred(self, user: dict) -> bool:
         """
@@ -739,6 +844,18 @@ class Tools:
             default=500,
             description="Maximum characters to show in episode content previews. Lower values reduce context usage.",
         )
+        default_group_suffix: str = Field(
+            default="",
+            description="Default group_id suffix when group_suffix is not provided. Use \"\" for no suffix. Invalid characters are sanitized to underscores.",
+        )
+        allowed_group_suffixes: str = Field(
+            default="",
+            description="Comma-separated list of allowed group_id suffixes for AI-specified group_suffix (e.g., \"_chat,_screen\"). \"\" disables AI-specified suffixes; \"*\" allows any suffix.",
+        )
+        allowed_group_suffix_empty: bool = Field(
+            default=True,
+            description="Allow explicit empty group_suffix (no suffix) when AI specifies group_suffix=\"\". Applies even when allowed_group_suffixes is empty.",
+        )
         pass
 
     def __init__(self):
@@ -980,6 +1097,7 @@ class Tools:
     async def migrate_builtin_memories(
         self,
         dry_run: bool = False,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -1001,6 +1119,7 @@ class Tools:
         - dry_run: If True, preview what would be migrated without making changes
                    Confirmation dialog is skipped in dry-run mode
                    Default: False
+        - group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
 
         Returns:
         - str: Migration summary report with statistics
@@ -1037,7 +1156,9 @@ class Tools:
                 print(f"Set user headers: {list(headers.keys())}")
 
         # 3. Get group_id for episode filtering
-        group_id = self.helper.get_group_id(__user__)
+        group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+        if error_msg:
+            return error_msg
         if not group_id:
             return "❌ Error: Group ID required. Check group_id_format configuration."
 
@@ -1342,11 +1463,55 @@ class Tools:
 
         return "\n".join(result_lines)
 
+    async def get_available_group_suffixes(
+        self,
+        __user__: dict = {},
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Return available group_id suffix options for the current user.
+
+        Use this to discover allowed suffixes, the default suffix, and the current group_id_format.
+
+        :return: JSON string with suffix rules and current group_id_format
+        """
+        user_valves = self.UserValves.model_validate(
+            (__user__ or {}).get("valves", {})
+        )
+
+        default_suffix = _sanitize_group_suffix(
+            _normalize_group_suffix(user_valves.default_group_suffix)
+        )
+        suffix_feature_enabled, allow_all, allowed_suffixes = _parse_allowed_group_suffixes(
+            user_valves.allowed_group_suffixes
+        )
+
+        payload = {
+            "suffix_feature_enabled": suffix_feature_enabled,
+            "allow_all_suffixes": allow_all,
+            "allowed_suffixes": _format_allowed_group_suffixes(allow_all, allowed_suffixes),
+            "default_group_suffix": default_suffix,
+            "allowed_group_suffix_empty": user_valves.allowed_group_suffix_empty,
+            "group_id_format": self.valves.group_id_format,
+        }
+
+        if not suffix_feature_enabled:
+            note = (
+                "group_suffix is disabled because allowed_group_suffixes is empty. "
+                "Omit group_suffix to use default_group_suffix."
+            )
+            if user_valves.allowed_group_suffix_empty:
+                note += " Empty group_suffix (\"\") is allowed."
+            payload["note"] = note
+
+        return json.dumps(payload)
+
     async def search_entities(
         self,
         query: str,
         limit: int = 10,
         show_uuid: bool = False,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
@@ -1355,10 +1520,11 @@ class Tools:
         
         This tool allows you to preview entities before deciding to delete them.
         Use this to verify what will be deleted before calling search_and_delete_entities.
-        
+
         :param query: Search query to find entities (e.g., "John Smith", "Python programming")
         :param limit: Maximum number of entities to return (default: 10, max: 100)
         :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: List of found entities with their details
         """
         
@@ -1376,7 +1542,9 @@ class Tools:
         limit = max(1, min(100, limit))
         
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
@@ -1426,6 +1594,7 @@ class Tools:
         query: str,
         limit: int = 10,
         show_uuid: bool = False,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
@@ -1438,6 +1607,7 @@ class Tools:
         :param query: Search query to find relationships (e.g., "works at", "friends with")
         :param limit: Maximum number of facts to return (default: 10, max: 100)
         :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: List of found facts with their details
         """
         
@@ -1455,7 +1625,9 @@ class Tools:
         limit = max(1, min(100, limit))
         
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
@@ -1506,6 +1678,7 @@ class Tools:
         query: str,
         limit: int = 10,
         show_uuid: bool = True,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
@@ -1518,6 +1691,7 @@ class Tools:
         :param query: Search query to find episodes (e.g., "conversation about Python")
         :param limit: Maximum number of episodes to return (default: 10, max: 100)
         :param show_uuid: Whether to display UUID in search results (default: True). UUIDs can be used with get_episode_content to retrieve full content.
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: List of found episodes with their details
         """
 
@@ -1535,7 +1709,9 @@ class Tools:
         limit = max(1, min(100, limit))
 
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
 
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
@@ -1605,6 +1781,7 @@ class Tools:
         limit: int = 10,
         offset: int = 0,
         show_uuid: bool = True,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
@@ -1617,6 +1794,7 @@ class Tools:
         :param limit: Maximum number of episodes to return (default: 10, max: 100)
         :param offset: Number of episodes to skip for pagination (default: 0)
         :param show_uuid: Whether to display UUID in results (default: True). UUIDs can be used with get_episode_content to retrieve full content.
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: List of recent episodes with their details
 
         Examples:
@@ -1640,7 +1818,9 @@ class Tools:
         offset = max(0, offset)
 
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
 
             if self.valves.debug_print:
                 print(f"=== get_recent_episodes: Fetching episodes ===")
@@ -1803,6 +1983,7 @@ class Tools:
         start_time: str,
         end_time: str,
         time_field: str = "created_at",
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -1840,6 +2021,7 @@ class Tools:
         :param time_field: (Optional) Timestamp field to filter by: "created_at" (default) or "valid_at".
                            Usually not needed - only specify if explicitly required for special cases.
                            Do NOT ask users about this parameter unless they specifically mention it.
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deletion status
 
         Example:
@@ -1891,7 +2073,9 @@ class Tools:
 
             # 2. Fetch and Filter Episodes
             # Get group_id
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             if not group_id:
                 return "❌ Error: Group ID is required. Please check your group_id_format configuration."
 
@@ -2062,6 +2246,7 @@ class Tools:
         self,
         query: str,
         limit: int = 1,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -2076,11 +2261,9 @@ class Tools:
         
         :param query: Search query to find entities (e.g., "John Smith", "Python programming")
         :param limit: Maximum number of entities to return (default: 1, max: 100)
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deleted entities count
-        
-        Note: __user__, __event_emitter__, and __event_call__ are automatically injected by the system.
         """
-        
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
         
@@ -2095,7 +2278,9 @@ class Tools:
         limit = max(1, min(100, limit))
         
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
@@ -2165,6 +2350,7 @@ class Tools:
         self,
         query: str,
         limit: int = 1,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -2179,11 +2365,9 @@ class Tools:
         
         :param query: Search query to find relationships (e.g., "works at", "friends with")
         :param limit: Maximum number of facts to return (default: 1, max: 100)
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deleted facts count
-        
-        Note: __user__, __event_emitter__, and __event_call__ are automatically injected by the system.
         """
-        
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
         
@@ -2198,7 +2382,9 @@ class Tools:
         limit = max(1, min(100, limit))
         
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
@@ -2271,6 +2457,7 @@ class Tools:
         self,
         query: str,
         limit: int = 1,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -2285,11 +2472,9 @@ class Tools:
         
         :param query: Search query to find episodes (e.g., "conversation about Python")
         :param limit: Maximum number of episodes to return (default: 1, max: 100)
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deleted episodes count
-        
-        Note: __user__, __event_emitter__, and __event_call__ are automatically injected by the system.
         """
-        
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
         
@@ -2304,7 +2489,9 @@ class Tools:
         limit = max(1, min(100, limit))
         
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             
             # Create a copy of config with custom limit
             search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
@@ -2380,6 +2567,7 @@ class Tools:
         node_uuids: str = "",
         edge_uuids: str = "",
         episode_uuids: str = "",
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -2395,9 +2583,8 @@ class Tools:
         :param node_uuids: Comma-separated list of node UUIDs to delete
         :param edge_uuids: Comma-separated list of edge UUIDs to delete
         :param episode_uuids: Comma-separated list of episode UUIDs to delete
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deletion status
-        
-        Note: __user__, __event_emitter__, and __event_call__ are automatically injected by the system.
         """
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
@@ -2411,6 +2598,12 @@ class Tools:
                 print(f"Set user headers in context: {list(headers.keys())}")
         
         try:
+            # Validate group_suffix for authorization purposes only.
+            # UUIDs are globally unique, so deletion doesn't need group filtering.
+            _, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
+
             # Get user's language preference first
             is_japanese = self.helper.is_japanese_preferred(__user__)
             
@@ -2550,6 +2743,7 @@ class Tools:
     
     async def clear_all_memory(
         self,
+        group_suffix: Optional[str] = None,
         __user__: dict = {},
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
         __event_call__: Optional[Callable[[dict], Any]] = None,
@@ -2562,9 +2756,8 @@ class Tools:
         
         IMPORTANT: Requires user confirmation dialog before execution.
         
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deletion status
-        
-        Note: __user__, __event_emitter__, and __event_call__ are automatically injected by the system.
         """
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
@@ -2577,7 +2770,9 @@ class Tools:
             if self.valves.debug_print:
                 print(f"Set user headers in context: {list(headers.keys())}")
         try:
-            group_id = self.helper.get_group_id(__user__)
+            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
+            if error_msg:
+                return error_msg
             
             if not group_id:
                 return "❌ Error: Group ID is required for memory clearing. Please check your group_id_format configuration."
