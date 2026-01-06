@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.6.0
+version: 0.6.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -1105,40 +1105,16 @@ class Tools:
         """
         Migrate Open WebUI built-in memories to Graphiti knowledge graph.
 
-        This method safely migrates all built-in memories for the current user to Graphiti episodes.
-        The migration is idempotent - running it multiple times will not create duplicates.
-
-        Migration Strategy:
-        - Each built-in memory is converted to a Graphiti episode
-        - Source type: EpisodeType.text (built-in memories are text-based)
-        - Episode name: {timestamp}_Migrated_{memory_id} format (e.g., "20241225T093000Z_Migrated_uuid")
-        - Timestamp: Preserved from built-in memory's created_at in UTC
-        - Idempotency marker: source_description = "migrated_builtin_memory:{memory.id}"
-
-        Parameters:
-        - dry_run: If True, preview what would be migrated without making changes
-                   Confirmation dialog is skipped in dry-run mode
-                   Default: False
-        - group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-
-        Returns:
-        - str: Migration summary report with statistics
-
-        Examples:
-        - migrate_builtin_memories() → Migrate all memories (with confirmation)
-        - migrate_builtin_memories(dry_run=True) → Preview migration without changes
-
-        Safety Features:
-        - Idempotent: Safe to run multiple times (checks source_description)
-        - Graceful failure: Individual failures don't stop the migration
-        - Confirmation dialog: Requires user approval when dry_run=False
-        - Detailed reporting: Shows success, failures, and already migrated counts
-        - Preserves timestamps: Maintains original creation time in UTC
+        Idempotent - safe to run multiple times (duplicates are skipped).
+        Requires user confirmation unless dry_run=True.
 
         Note: Built-in memories are NOT deleted after migration. Users can manually
-              delete them from Open WebUI UI (Settings → Personalization → Memory).
-        """
+        delete them from Open WebUI UI (Settings → Personalization → Memory).
 
+        :param dry_run: Preview migration without making changes (default: False)
+        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
+        :return: Migration summary report
+        """
         # === Phase 1: Initialization & Validation ===
 
         if self.valves.debug_print:
@@ -1469,11 +1445,17 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Return available group_id suffix options for the current user.
+        Get available group_suffix options for the current user.
 
-        Use this to discover allowed suffixes, the default suffix, and the current group_id_format.
+        Call this BEFORE using group_suffix parameter in other tools to:
+        - Check if custom suffixes are enabled for this user
+        - See which suffix values are allowed
+        - Know the default suffix (used when group_suffix is not specified)
 
-        :return: JSON string with suffix rules and current group_id_format
+        When suffix_feature_enabled=false, do not specify group_suffix parameter.
+        The default_group_suffix will be used automatically.
+
+        :return: JSON with suffix_feature_enabled, allowed_suffixes, default_group_suffix
         """
         user_valves = self.UserValves.model_validate(
             (__user__ or {}).get("valves", {})
@@ -1516,22 +1498,25 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Search for entities by name or description without deleting them.
-        
-        This tool allows you to preview entities before deciding to delete them.
-        Use this to verify what will be deleted before calling search_and_delete_entities.
+        Search memory for people, places, concepts, projects, or other entities.
 
-        :param query: Search query to find entities (e.g., "John Smith", "Python programming")
-        :param limit: Maximum number of entities to return (default: 10, max: 100)
-        :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        Use this proactively when:
+        - User mentions someone/something that might be in memory
+        - User asks "Do you remember...?" or refers to past conversations
+        - You need context about a previously discussed topic
+        - You want to provide more personalized, informed responses
+
+        Semantic search: queries like "development tools" find related tech entities.
+
+        :param query: Search query in user's language (memories are stored in original language)
+        :param limit: Maximum results (default: 10, max: 100)
+        :param show_uuid: Show UUIDs for manual deletion (default: False)
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: List of found entities with their details
+        :return: Found entities with details (name, summary)
         """
-        
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
-        
-        
+
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
@@ -1599,22 +1584,25 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Search for facts (relationships) without deleting them.
-        
-        This tool allows you to preview relationships before deciding to delete them.
-        Use this to verify what will be deleted before calling search_and_delete_facts.
-        
-        :param query: Search query to find relationships (e.g., "works at", "friends with")
-        :param limit: Maximum number of facts to return (default: 10, max: 100)
-        :param show_uuid: Whether to display UUID in search results (default: False). Set to True if you need to see UUIDs for debugging or manual deletion.
+        Search memory for facts (extracted relationships between entities).
+
+        Use this proactively when:
+        - User asks about relationships (e.g., "Who does X work with?", "What's related to Y?")
+        - You need to recall connections between people, places, or concepts
+        - User references a relationship that might be stored
+
+        Facts are extracted relationships, not raw conversation content.
+        For original conversation text, use search_episodes instead.
+
+        :param query: Search query in user's language (memories are stored in original language)
+        :param limit: Maximum results (default: 10, max: 100)
+        :param show_uuid: Show UUIDs for manual deletion (default: False)
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: List of found facts with their details
+        :return: Found facts with source/target entities and validity period
         """
-        
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
-        
-        
+
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
         if headers:
@@ -1683,18 +1671,21 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Search for episodes (conversation history) without deleting them.
+        Search past conversations and interaction history by content.
 
-        This tool allows you to preview episodes before deciding to delete them.
-        Use this to verify what will be deleted before calling search_and_delete_episodes.
+        Use this proactively when:
+        - User asks "What did we talk about...?" or "Do you remember when...?"
+        - You need to recall details from a specific past conversation
+        - User references a topic discussed previously
 
-        :param query: Search query to find episodes (e.g., "conversation about Python")
-        :param limit: Maximum number of episodes to return (default: 10, max: 100)
-        :param show_uuid: Whether to display UUID in search results (default: True). UUIDs can be used with get_episode_content to retrieve full content.
+        Episodes are raw conversation records. Use get_episode_content(uuid) to retrieve full content.
+
+        :param query: Search query in user's language (memories are stored in original language)
+        :param limit: Maximum results (default: 10, max: 100)
+        :param show_uuid: Show UUIDs for get_episode_content (default: True)
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: List of found episodes with their details
+        :return: Found episodes with previews
         """
-
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
 
@@ -1786,23 +1777,21 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Get recent episodes in chronological order (oldest first).
+        Browse recent conversation history in chronological order.
 
-        This tool retrieves episodes sorted by time without requiring a search query.
-        Useful for viewing your conversation history or recent memories in the order they occurred.
+        Use this when:
+        - User asks "What have we discussed recently?"
+        - You want to review recent interactions without a specific search query
+        - User wants to see their conversation timeline
 
-        :param limit: Maximum number of episodes to return (default: 10, max: 100)
-        :param offset: Number of episodes to skip for pagination (default: 0)
-        :param show_uuid: Whether to display UUID in results (default: True). UUIDs can be used with get_episode_content to retrieve full content.
+        Unlike search_episodes, this doesn't require a query - just retrieves recent history.
+
+        :param limit: Maximum results (default: 10, max: 100)
+        :param offset: Skip N episodes for pagination (default: 0)
+        :param show_uuid: Show UUIDs for get_episode_content (default: True)
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: List of recent episodes with their details
-
-        Examples:
-        - get_recent_episodes(limit=20) - Get the 20 most recent episodes
-        - get_recent_episodes(limit=10, offset=10) - Get episodes 11-20 (pagination)
-        - get_recent_episodes(limit=5, show_uuid=True) - Get 5 recent episodes with UUIDs
+        :return: Recent episodes in chronological order
         """
-
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
 
@@ -1915,15 +1904,15 @@ class Tools:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Get the full content of a specific episode by UUID.
+        Get full content of an episode by UUID (from search_episodes or get_recent_episodes).
 
-        Unlike search_episodes or get_recent_episodes which show truncated previews,
-        this method returns the complete, untruncated content of an episode.
+        Use this when:
+        - Search results show truncated previews and you need complete content
+        - User wants to see full details of a specific past conversation
 
-        :param uuid: The UUID of the episode to retrieve
+        :param uuid: Episode UUID from search_episodes or get_recent_episodes results
         :return: Full episode content with metadata
         """
-
         if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
             return "❌ Error: Memory service is not available"
 
