@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.20.0
+version: 0.20.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -91,6 +91,11 @@ try:
     from open_webui.models.models import Models  # type: ignore
 except Exception:  # pragma: no cover - fallback for non-core environments
     Models = None
+
+try:
+    from open_webui.models.functions import Functions  # type: ignore
+except Exception:  # pragma: no cover - fallback for non-core environments
+    Functions = None
 
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
@@ -216,6 +221,30 @@ def get_model_display_name(model_id: str) -> Optional[str]:
         model = Models.get_model_by_id(model_id)
         if model and model.name:
             return model.name
+    except Exception:
+        pass
+
+    return None
+
+
+def get_filter_display_name(filter_id: str) -> Optional[str]:
+    """
+    Get the display name of a filter from its ID.
+
+    Args:
+        filter_id: The filter ID to look up
+
+    Returns:
+        Filter display name if found, None otherwise.
+        Returns None if Functions table is unavailable or filter not found.
+    """
+    if Functions is None or not filter_id:
+        return None
+
+    try:
+        function = Functions.get_function_by_id(filter_id)
+        if function and function.name:
+            return function.name
     except Exception:
         pass
 
@@ -380,12 +409,18 @@ class Filter:
             description="Enable debug printing to console. When enabled, prints detailed information about search results, memory injection, and processing steps. Useful for troubleshooting.",
         )
         citation_source_id: str = Field(
-            default="graphiti-memory",
-            description="Source ID used for emitted citation events (controls grouping in the UI).",
+            default="",
+            description=(
+                "Source ID used for emitted citation events (controls grouping in the UI). "
+                "RECOMMENDED: Keep empty to auto-generate from filter ID."
+            ),
         )
         citation_source_name: str = Field(
-            default="Graphiti Memory",
-            description="Source display name used for emitted citation events.",
+            default="",
+            description=(
+                "Source display name used for emitted citation events. "
+                "RECOMMENDED: Keep empty to auto-generate from filter display name in database."
+            ),
         )
         citation_retention_seconds: int = Field(
             default=600,
@@ -551,6 +586,9 @@ class Filter:
         self._indices_built = False  # Track if indices have been built
         self._last_config = None  # Track configuration for change detection
         self._pending_citations: dict[tuple[str, str], dict[str, Any]] = {}
+        # Cached filter metadata for citation source auto-generation
+        self._cached_filter_id: Optional[str] = None
+        self._cached_filter_name: Optional[str] = None
         self._pending_citations_lock = asyncio.Lock()
         # Episode deduplication tracking: {(chat_id, episode_hash): timestamp}
         self._processed_episodes: dict[tuple[str, str], float] = {}
@@ -1952,8 +1990,8 @@ class Filter:
         if not fact_text:
             return None
 
-        source_id = self.valves.citation_source_id or "graphiti-memory"
-        source_name = self.valves.citation_source_name or "Graphiti Memory"
+        source_id = self.valves.citation_source_id or self._cached_filter_id or "graphiti-memory"
+        source_name = self.valves.citation_source_name or self._cached_filter_name or "Graphiti Memory"
 
         metadata: dict[str, Any] = {"source": source_id}
         valid_from = getattr(result, "valid_at", None)
@@ -2028,7 +2066,7 @@ class Filter:
         if not name or not summary:
             return None
 
-        source_id = self.valves.citation_source_id or "graphiti-memory"
+        source_id = self.valves.citation_source_id or self._cached_filter_id or "graphiti-memory"
         metadata: dict[str, Any] = {"source": source_id}
 
         if include_parameters:
@@ -2071,7 +2109,7 @@ class Filter:
         return {
             "source": {
                 "id": source_id,
-                "name": self.valves.citation_source_name or "Graphiti Memory",
+                "name": self.valves.citation_source_name or self._cached_filter_name or "Graphiti Memory",
                 "type": "graphiti_memory",
             },
             "document": [document_content],
@@ -3590,8 +3628,8 @@ window.addEventListener('resize', renderGraph, { passive: true });
             actual_injected_entities=actual_injected_entities,
             actual_injected_facts=actual_injected_facts,
         )
-        source_id = self.valves.citation_source_id or "graphiti-memory"
-        source_name = self.valves.citation_source_name or "Graphiti Memory"
+        source_id = self.valves.citation_source_id or self._cached_filter_id or "graphiti-memory"
+        source_name = self.valves.citation_source_name or self._cached_filter_name or "Graphiti Memory"
         metadata: dict[str, Any] = {
             "source": source_id,
             "html": overview_html,
@@ -3703,6 +3741,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __id__: Optional[str] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> dict:
+        # Cache filter metadata for citation source auto-generation (once per instance)
+        if __id__ and self._cached_filter_id is None:
+            self._cached_filter_id = __id__
+            self._cached_filter_name = get_filter_display_name(__id__)
+            if self.valves.debug_print:
+                print(f"Cached filter metadata: id={self._cached_filter_id}, name={self._cached_filter_name}")
+
         if self.valves.debug_print:
             print(f"inlet:{__name__}")
             print(f"inlet:user:{__user__}")
@@ -4116,6 +4161,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __metadata__: Optional[dict] = None,
         __id__: Optional[str] = None,
     ) -> dict:
+        # Cache filter metadata for citation source auto-generation (once per instance)
+        if __id__ and self._cached_filter_id is None:
+            self._cached_filter_id = __id__
+            self._cached_filter_name = get_filter_display_name(__id__)
+            if self.valves.debug_print:
+                print(f"Cached filter metadata: id={self._cached_filter_id}, name={self._cached_filter_name}")
+
         # Flush any pending citations immediately so they show up before long-running work
         await self._flush_pending_citations(__event_emitter__, __metadata__, __id__)
         filter_id_for_prefix = __id__ or "graphiti_memory"
