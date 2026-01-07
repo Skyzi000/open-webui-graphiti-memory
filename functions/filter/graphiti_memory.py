@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.20.1
+version: 0.20.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -4083,35 +4083,54 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 memory_role = "system"
             
             # Format memory content with improved structure
-            memory_content = "FACTS and ENTITIES represent relevant context to the current conversation.  \n"
+            # Priority: explicit Valves setting > cached filter name > filter ID > fallback
+            source_name = (
+                self.valves.citation_source_name
+                or self._cached_filter_name
+                or self._cached_filter_id
+                or "Graphiti Memory"
+            )
+            
+            # Build description based on what content types are present
+            if len(facts) > 0 and len(entities) > 0:
+                content_desc = "FACTS and ENTITIES"
+            elif len(facts) > 0:
+                content_desc = "FACTS"
+            else:
+                content_desc = "ENTITIES"
+            
+            memory_content = f'<{source_name}>\n'
+            memory_content += f"# {content_desc} from '{source_name}' represent relevant context to the current conversation.\n"
             
             # Add facts section if any facts were found
             if len(facts) > 0:
-                memory_content += "# These are the most relevant facts and their valid date ranges  \n"
-                memory_content += "# format: FACT (Date range: from - to)  \n"
-                memory_content += "<FACTS>  \n"
+                memory_content += "# These are the most relevant facts and their valid date ranges\n"
+                memory_content += "# format: FACT (Date range: from - to)\n"
+                memory_content += "<FACTS>\n"
                 
                 for fact, valid_at, invalid_at, name in facts:
                     # Format date range
                     valid_str = str(valid_at) if valid_at else "unknown"
                     invalid_str = str(invalid_at) if invalid_at else "present"
                     
-                    memory_content += f"  - {fact} ({valid_str} - {invalid_str})  \n"
+                    memory_content += f"  - {fact} ({valid_str} - {invalid_str})\n"
                 
                 memory_content += "</FACTS>"
             
             # Add entities section if any entities were found
             if len(entities) > 0:
                 if len(facts) > 0:
-                    memory_content += "  \n\n"  # Add spacing between sections
-                memory_content += "# These are the most relevant entities  \n"
-                memory_content += "# ENTITY_NAME: entity summary  \n"
-                memory_content += "<ENTITIES>  \n"
+                    memory_content += "\n\n"  # Add spacing between sections
+                memory_content += "# These are the most relevant entities\n"
+                memory_content += "# ENTITY_NAME: entity summary\n"
+                memory_content += "<ENTITIES>\n"
                 
                 for entity_name, entity_summary in entities.items():
-                    memory_content += f"  - {entity_name}: {entity_summary}  \n"
+                    memory_content += f"  - {entity_name}: {entity_summary}\n"
                 
                 memory_content += "</ENTITIES>"
+            
+            memory_content += f"\n</{source_name}>"
             
             # Insert memory before the last user message
             memory_message = {
