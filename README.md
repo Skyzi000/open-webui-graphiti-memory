@@ -75,6 +75,35 @@ AI-callable tools for memory management.
 - **Facts (Edges)**: Relationships between entities with temporal validity
 - **Episodes**: Conversation history and source documents
 
+### 🔍 Tools: Graphiti Search (Read-Only)
+
+**Location**: `tools/graphiti_search.py`
+
+AI-callable tools for **read-only** memory search. Designed for users who want AI to access memories without modification capabilities.
+
+**Use Cases:**
+
+- Users who want AI to search memories but NOT modify/delete them
+- Accessing shared knowledge bases across multiple users
+- Separate read and write permissions for different AI models
+
+**Features:**
+
+- `search_entities`: Find named entities (people, places, concepts)
+- `search_facts`: Find extracted relationships between entities
+- `search_episodes`: Search raw conversation records
+- `get_recent_episodes`: Retrieve recent history with pagination
+- `get_episode_content`: Get full episode content by UUID
+- `get_available_group_ids`: Show allowed group_id options
+
+**Configuration:**
+
+- `group_id_formats`: Comma-separated group ID templates with optional descriptions
+  - Example: `{user_id}:Personal memory,common:Shared knowledge`
+  - First entry is the default
+  - Add `none` to allow unrestricted access across all groups
+- Supports the same LLM/database configuration as other tools
+
 #### Built-in Memory Migration
 
 The `migrate_builtin_memories` tool migrates your existing Open WebUI built-in memories to the Graphiti knowledge graph.
@@ -149,7 +178,8 @@ Copy the raw GitHub URLs and paste them into Open WebUI's import dialog:
 
 - Filter: `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/functions/filter/graphiti_memory.py`
 - Action: `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/functions/action/add_graphiti_memory_action.py`
-- Tools: `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/tools/graphiti_memory_manage.py`
+- Tools (Manage): `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/tools/graphiti_memory_manage.py`
+- Tools (Search, Read-Only): `https://raw.githubusercontent.com/Skyzi000/open-webui-graphiti-memory/main/tools/graphiti_search.py`
 
 For detailed instructions, refer to the [Open WebUI official documentation](https://docs.openwebui.com/).
 
