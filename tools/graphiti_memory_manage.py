@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.6.2
+version: 0.6.3
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -62,7 +62,10 @@ from openai import AsyncOpenAI
 
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
-user_headers_context = contextvars.ContextVar('user_headers', default={})
+# Default is None, callers should always call .set() before use
+user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
+    'user_headers', default=None
+)
 
 
 def _normalize_group_suffix(value: Optional[str]) -> str:
@@ -311,9 +314,8 @@ class GraphitiHelper:
         if self.valves.debug_print:
             print("Initializing Graphiti for memory deletion...")
         
-        # Disable telemetry if configured
-        if not self.valves.graphiti_telemetry_enabled:
-            os.environ['GRAPHITI_TELEMETRY_ENABLED'] = 'false'
+        # Set telemetry based on configuration
+        os.environ['GRAPHITI_TELEMETRY_ENABLED'] = 'true' if self.valves.graphiti_telemetry_enabled else 'false'
         
         # Set semaphore limit via environment variable
         os.environ['SEMAPHORE_LIMIT'] = str(self.valves.semaphore_limit)
@@ -718,19 +720,23 @@ def get_user_info_headers(valves, user: Optional[dict] = None, chat_id: Optional
     if not enable_forward:
         return {}
 
+    def _sanitize_header_value(value: str) -> str:
+        """Remove control characters and newlines to prevent header injection."""
+        return re.sub(r'[\x00-\x1f\x7f\r\n]', '', str(value))
+
     headers = {}
     if user:
         if user.get('name'):
-            headers['X-OpenWebUI-User-Name'] = quote(str(user['name']), safe=" ")
+            headers['X-OpenWebUI-User-Name'] = quote(_sanitize_header_value(user['name']), safe=" ")
         if user.get('id'):
-            headers['X-OpenWebUI-User-Id'] = str(user['id'])
+            headers['X-OpenWebUI-User-Id'] = _sanitize_header_value(user['id'])
         if user.get('email'):
-            headers['X-OpenWebUI-User-Email'] = str(user['email'])
+            headers['X-OpenWebUI-User-Email'] = _sanitize_header_value(user['email'])
         if user.get('role'):
-            headers['X-OpenWebUI-User-Role'] = str(user['role'])
+            headers['X-OpenWebUI-User-Role'] = _sanitize_header_value(user['role'])
 
     if chat_id:
-        headers['X-OpenWebUI-Chat-Id'] = str(chat_id)
+        headers['X-OpenWebUI-Chat-Id'] = _sanitize_header_value(chat_id)
 
     return headers
 
@@ -1522,7 +1528,10 @@ class Tools:
         if self.valves.debug_print and headers:
             print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
-        limit = max(1, min(100, limit))
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return "❌ Error: limit must be an integer"
         
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -1607,7 +1616,10 @@ class Tools:
         if self.valves.debug_print and headers:
             print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
-        limit = max(1, min(100, limit))
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return "❌ Error: limit must be an integer"
         
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -1693,7 +1705,10 @@ class Tools:
         if self.valves.debug_print and headers:
             print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
-        limit = max(1, min(100, limit))
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return "❌ Error: limit must be an integer"
 
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -1798,8 +1813,11 @@ class Tools:
             print(f"Set user headers in context: {list(headers.keys())}")
 
         # Validate and clamp parameters
-        limit = max(1, min(100, limit))
-        offset = max(0, offset)
+        try:
+            limit = max(1, min(100, int(limit)))
+            offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            return "❌ Error: limit and offset must be integers"
 
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -2256,7 +2274,10 @@ class Tools:
         if self.valves.debug_print and headers:
             print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
-        limit = max(1, min(100, limit))
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return "❌ Error: limit must be an integer"
         
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -2359,7 +2380,10 @@ class Tools:
         if self.valves.debug_print and headers:
             print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
-        limit = max(1, min(100, limit))
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return "❌ Error: limit must be an integer"
         
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -2465,7 +2489,10 @@ class Tools:
         if self.valves.debug_print and headers:
             print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
-        limit = max(1, min(100, limit))
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return "❌ Error: limit must be an integer"
         
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)

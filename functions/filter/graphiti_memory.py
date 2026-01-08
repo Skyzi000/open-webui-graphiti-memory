@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.20.3
+version: 0.20.4
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -48,7 +48,7 @@ import time
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Optional, Callable, Awaitable, Any
+from typing import Dict, Optional, Callable, Awaitable, Any
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
@@ -99,7 +99,10 @@ except Exception:  # pragma: no cover - fallback for non-core environments
 
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
-user_headers_context = contextvars.ContextVar('user_headers', default={})
+# Default is None, callers should always call .set() before use
+user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
+    'user_headers', default=None
+)
 
 
 class MultiUserOpenAIClient(OpenAIClient):
@@ -702,19 +705,23 @@ class Filter:
         if not enable_forward:
             return {}
         
+        def _sanitize_header_value(value: str) -> str:
+            """Remove control characters and newlines to prevent header injection."""
+            return re.sub(r'[\x00-\x1f\x7f\r\n]', '', str(value))
+        
         headers = {}
         if user:
             if user.get('name'):
-                headers['X-OpenWebUI-User-Name'] = quote(str(user['name']), safe=" ")
+                headers['X-OpenWebUI-User-Name'] = quote(_sanitize_header_value(user['name']), safe=" ")
             if user.get('id'):
-                headers['X-OpenWebUI-User-Id'] = str(user['id'])
+                headers['X-OpenWebUI-User-Id'] = _sanitize_header_value(user['id'])
             if user.get('email'):
-                headers['X-OpenWebUI-User-Email'] = str(user['email'])
+                headers['X-OpenWebUI-User-Email'] = _sanitize_header_value(user['email'])
             if user.get('role'):
-                headers['X-OpenWebUI-User-Role'] = str(user['role'])
+                headers['X-OpenWebUI-User-Role'] = _sanitize_header_value(user['role'])
         
         if chat_id:
-            headers['X-OpenWebUI-Chat-Id'] = str(chat_id)
+            headers['X-OpenWebUI-Chat-Id'] = _sanitize_header_value(chat_id)
         
         return headers
     
@@ -1325,28 +1332,35 @@ class Filter:
         if self.valves.group_id_format.lower().strip() == "none":
             return None
         
-        # Prepare replacement values
-        user_id = user.get('id', 'unknown')
-        user_email = user.get('email', user_id)
-        user_name = user.get('name', user_id)
-        
-        # Sanitize email to meet Graphiti's group_id requirements
-        sanitized_email = user_email.replace('@', '_at_').replace('.', '_')
-        
-        # Sanitize name (replace spaces and special characters)
-        sanitized_name = re.sub(r'[^a-zA-Z0-9_-]', '_', user_name)
-        
-        # Format the group_id using the template
-        group_id = self.valves.group_id_format.format(
-            user_id=user_id,
-            user_email=sanitized_email,
-            user_name=sanitized_name,
-        )
-        
-        # Final sanitization to ensure only alphanumeric, dashes, underscores
-        group_id = re.sub(r'[^a-zA-Z0-9_-]', '_', group_id)
-        
-        return group_id
+        try:
+            # Prepare replacement values
+            user_id = user.get('id', 'unknown')
+            user_email = user.get('email') or user_id
+            user_name = user.get('name') or user_id
+            
+            # Sanitize email to meet Graphiti's group_id requirements
+            sanitized_email = str(user_email).replace('@', '_at_').replace('.', '_')
+            
+            # Sanitize name (replace spaces and special characters)
+            sanitized_name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(user_name))
+            
+            # Format the group_id using the template
+            group_id = self.valves.group_id_format.format(
+                user_id=user_id,
+                user_email=sanitized_email,
+                user_name=sanitized_name,
+            )
+            
+            # Final sanitization to ensure only alphanumeric, dashes, underscores
+            group_id = re.sub(r'[^a-zA-Z0-9_-]', '_', group_id)
+            
+            return group_id
+        except (KeyError, ValueError, IndexError) as e:
+            # Invalid template format - fall back to user_id
+            if self.valves.debug_print:
+                print(f"Warning: Invalid group_id_format template: {e}. Falling back to user_id.")
+            user_id = user.get('id', 'unknown')
+            return re.sub(r'[^a-zA-Z0-9_-]', '_', str(user_id))
     
     def _get_search_config(self, user_valves: "Filter.UserValves"):
         """

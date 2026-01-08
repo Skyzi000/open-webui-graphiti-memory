@@ -4,7 +4,7 @@ description: Action button to search and delete an episode from Graphiti knowled
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.2.2
+version: 0.2.3
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cGF0aCBkPSJNOCA5aDN2MTZIOHptNiAwaDN2MTZoLTN6bTYgMGgzdjE2aC0zeiIgZmlsbD0iIzRjNGM0YyIvPgogIDxyZWN0IHg9IjYiIHk9IjYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIzIiByeD0iMSIgZmlsbD0iIzRjNGM0YyIvPgogIDxwYXRoIGQ9Ik0xMSA2VjRhMiAyIDAgMCAxIDItMmg2YTIgMiAwIDAgMSAyIDJ2MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwYXRoIGQ9Ik03IDloMTh2MThhMiAyIDAgMCAxLTIgMkg5YTIgMiAwIDAgMS0yLTJWOXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+
 
@@ -25,7 +25,7 @@ import hashlib
 import os
 import re
 import traceback
-from typing import Optional
+from typing import Dict, Optional
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
@@ -55,7 +55,11 @@ from graphiti_core.search.search_config_recipes import (
 from openai import AsyncOpenAI
 
 # Context variable to store user-specific headers for each async request
-user_headers_context = contextvars.ContextVar('user_headers', default={})
+# This ensures complete isolation between concurrent requests without locks
+# Default is None, callers should always call .set() before use
+user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
+    'user_headers', default=None
+)
 
 
 class MultiUserOpenAIClient(OpenAIClient):
@@ -410,21 +414,28 @@ class Action:
         if self.valves.group_id_format.lower().strip() == "none":
             return None
 
-        user_id = user.get('id', 'unknown')
-        user_email = user.get('email', user_id)
-        user_name = user.get('name', user_id)
+        try:
+            user_id = user.get('id', 'unknown')
+            user_email = user.get('email') or user_id
+            user_name = user.get('name') or user_id
 
-        sanitized_email = user_email.replace('@', '_at_').replace('.', '_')
-        sanitized_name = re.sub(r'[^a-zA-Z0-9_-]', '_', user_name)
+            sanitized_email = str(user_email).replace('@', '_at_').replace('.', '_')
+            sanitized_name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(user_name))
 
-        group_id = self.valves.group_id_format.format(
-            user_id=user_id,
-            user_email=sanitized_email,
-            user_name=sanitized_name,
-        )
+            group_id = self.valves.group_id_format.format(
+                user_id=user_id,
+                user_email=sanitized_email,
+                user_name=sanitized_name,
+            )
 
-        group_id = re.sub(r'[^a-zA-Z0-9_-]', '_', group_id)
-        return group_id
+            group_id = re.sub(r'[^a-zA-Z0-9_-]', '_', group_id)
+            return group_id
+        except (KeyError, ValueError, IndexError) as e:
+            # Invalid template format - fall back to user_id
+            if self.valves.debug_print:
+                print(f"Warning: Invalid group_id_format template: {e}. Falling back to user_id.")
+            user_id = user.get('id', 'unknown')
+            return re.sub(r'[^a-zA-Z0-9_-]', '_', str(user_id))
 
     def _get_user_info_headers(self, user: Optional[dict] = None, chat_id: Optional[str] = None) -> dict:
         valves_setting = self.valves.forward_user_info_headers.lower()
@@ -442,20 +453,24 @@ class Action:
         if not enable_forward:
             return {}
 
+        def _sanitize_header_value(value: str) -> str:
+            """Remove control characters and newlines to prevent header injection."""
+            return re.sub(r'[\x00-\x1f\x7f\r\n]', '', str(value))
+        
         headers = {}
         if user:
             if user.get('name'):
-                headers['X-OpenWebUI-User-Name'] = quote(str(user['name']), safe=" ")
+                headers['X-OpenWebUI-User-Name'] = quote(_sanitize_header_value(user['name']), safe=" ")
             if user.get('id'):
-                headers['X-OpenWebUI-User-Id'] = str(user['id'])
+                headers['X-OpenWebUI-User-Id'] = _sanitize_header_value(user['id'])
             if user.get('email'):
-                headers['X-OpenWebUI-User-Email'] = str(user['email'])
+                headers['X-OpenWebUI-User-Email'] = _sanitize_header_value(user['email'])
             if user.get('role'):
-                headers['X-OpenWebUI-User-Role'] = str(user['role'])
-
+                headers['X-OpenWebUI-User-Role'] = _sanitize_header_value(user['role'])
+        
         if chat_id:
-            headers['X-OpenWebUI-Chat-Id'] = str(chat_id)
-
+            headers['X-OpenWebUI-Chat-Id'] = _sanitize_header_value(chat_id)
+        
         return headers
 
     def _get_content_from_message(self, message: dict) -> Optional[str]:
