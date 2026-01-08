@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.6.1
+version: 0.6.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -1126,10 +1126,9 @@ class Tools:
 
         # 2. Set user headers for API calls
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers: {list(headers.keys())}")
 
         # 3. Get group_id for episode filtering
         group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
@@ -1519,10 +1518,9 @@ class Tools:
 
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
         
@@ -1605,10 +1603,9 @@ class Tools:
 
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
         
@@ -1692,10 +1689,9 @@ class Tools:
 
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
 
@@ -1797,10 +1793,9 @@ class Tools:
 
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
 
         # Validate and clamp parameters
         limit = max(1, min(100, limit))
@@ -1918,10 +1913,9 @@ class Tools:
 
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
 
         if not uuid or not uuid.strip():
             return "❌ Error: UUID is required"
@@ -2023,10 +2017,9 @@ class Tools:
 
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
 
         try:
             # 1. Parameter Validation
@@ -2259,10 +2252,9 @@ class Tools:
         
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
         
@@ -2363,10 +2355,9 @@ class Tools:
         
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
         
@@ -2470,10 +2461,9 @@ class Tools:
         
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         # Validate and clamp limit
         limit = max(1, min(100, limit))
         
@@ -2581,10 +2571,9 @@ class Tools:
         
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         
         try:
             # Validate group_suffix for authorization purposes only.
@@ -2754,10 +2743,9 @@ class Tools:
         
         # Set user headers in context variable (before any API calls)
         headers = get_user_info_headers(self.valves, __user__, None)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         try:
             group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
             if error_msg:

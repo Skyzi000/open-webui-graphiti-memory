@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.20.2
+version: 0.20.3
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -1091,8 +1091,7 @@ class Filter:
         
         # Set user headers for API calls
         headers = self._get_user_info_headers(__user__, chat_id)
-        if headers:
-            user_headers_context.set(headers)
+        user_headers_context.set(headers)
         
         # NOTE: Confirmation is handled by JavaScript UI (two-click confirmation on the
         # delete button) before sending this command. We don't use __event_call__ here
@@ -3809,10 +3808,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Set user headers in context variable (before any API calls)
         chat_id = __metadata__.get('chat_id') if __metadata__ else None
         headers = self._get_user_info_headers(__user__, chat_id)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
         
         if __user__ is None:
             if self.valves.debug_print:
@@ -4223,10 +4221,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
         
         # Set user headers in context variable (before any API calls)
         headers = self._get_user_info_headers(__user__, chat_id)
-        if headers:
-            user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
 
         messages = body.get("messages", [])
         if len(messages) == 0:
