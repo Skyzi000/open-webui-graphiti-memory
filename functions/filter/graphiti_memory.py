@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.20.4
+version: 0.21.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -475,6 +475,16 @@ class Filter:
                 "is performed by the Filter without AI involvement."
             ),
         )
+        read_only: bool = Field(
+            default=False,
+            description=(
+                "Enable read-only mode. When enabled, ALL save and delete operations are disabled "
+                "regardless of user settings. This is useful for shared knowledge bases where users should "
+                "only be able to search/retrieve information but not modify the memory graph. "
+                "Note: This overrides all UserValves related to saving (save_user_message, save_assistant_response, "
+                "save_previous_assistant_message) and delete (enable_delete_command)."
+            ),
+        )
         wait_for_chat_title: bool = Field(
             default=True,
             description=(
@@ -515,16 +525,16 @@ class Filter:
         )
         save_user_message: bool = Field(
             default=True,
-            description="Automatically save user messages as memories.",
+            description="Automatically save user messages as memories. Note: Ignored when admin read_only mode is enabled.",
         )
         save_assistant_response: bool = Field(
             default=False,
-            description="Automatically save assistant responses (latest) as memories.",
+            description="Automatically save assistant responses (latest) as memories. Note: Ignored when admin read_only mode is enabled.",
         )
         
         save_previous_assistant_message: bool = Field(
             default=True,
-            description="Save the assistant message that the user is responding to (the one before the latest user message).",
+            description="Save the assistant message that the user is responding to (the one before the latest user message). Note: Ignored when admin read_only mode is enabled.",
         )
         merge_retrieved_context: bool = Field(
             default=True,
@@ -572,7 +582,7 @@ class Filter:
         )
         enable_delete_command: bool = Field(
             default=True,
-            description="Enable the /graphiti-delete-entity command for deleting entities directly from the Filter (no AI/Tool dependency). When enabled, clicking the delete button in entity citations sends a command that the Filter processes directly.",
+            description="Enable the /graphiti-delete-entity command for deleting entities directly from the Filter (no AI/Tool dependency). When enabled, clicking the delete button in entity citations sends a command that the Filter processes directly. Note: Ignored when admin read_only mode is enabled.",
         )
         auto_disable_search_on_temporary_chat: bool = Field(
             default=True,
@@ -1060,6 +1070,11 @@ class Filter:
         """
         if self.valves.debug_print:
             print(f"Processing delete command: {content[:100]}...")
+        
+        # Check if read-only mode is enabled (admin override)
+        if self.valves.read_only:
+            error_msg = "読み取り専用モードが有効なため、削除できません。" if is_ja else "Cannot delete: Read-only mode is enabled."
+            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
         
         # Parse command: /graphiti-delete-entity UUID [EntityName]
         # UUID is required, EntityName is optional (may contain spaces)
@@ -4204,6 +4219,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
         filter_id_for_prefix = __id__ or "graphiti_memory"
 
         user_valves: Filter.UserValves = self.UserValves.model_validate((__user__ or {}).get("valves", {}))
+        
+        # Check if read-only mode is enabled (admin override)
+        if self.valves.read_only:
+            if self.valves.debug_print:
+                print("Read-only mode enabled. Skipping memory storage.")
+            return body
+        
         # Check if user has disabled the feature
         if __user__:
             if not user_valves.enabled:
