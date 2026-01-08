@@ -4,7 +4,7 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.1
+version: 0.3.2
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
 
@@ -615,10 +615,9 @@ class Action:
             
             # Set user headers in context variable
             headers = self._get_user_info_headers(__user__, chat_id)
-            if headers:
-                user_headers_context.set(headers)
-                if self.valves.debug_print:
-                    print(f"Set user headers in context: {list(headers.keys())}")
+            user_headers_context.set(headers)
+            if self.valves.debug_print and headers:
+                print(f"Set user headers in context: {list(headers.keys())}")
 
             if user_valves.show_status:
                 msg = "✍️ Graphitiメモリに手動保存中..." if is_ja else "✍️ Manually saving to Graphiti memory..."

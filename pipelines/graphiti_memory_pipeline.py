@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Unlike filters, this pipeline can run on a dedicated pipelines server separate from the main Open WebUI instance while still exposing inlet/outlet hooks to Open WebUI. Important limitations: (1) Open WebUI pipelines currently never receive per-user UserValves, so end users always inherit the defaults defined below, and (2) the core does not forward __event_emitter__ into pipelines, so status updates must fall back to local no-op emitters. If you require per-user settings or live status updates, use the filter implementation instead.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.7.4
+version: 0.7.5
 requirements: graphiti-core[falkordb]
 
 Design:
@@ -923,12 +923,11 @@ class Pipeline:
         
         # Set user headers in context variable (before any API calls)
         chat_id = __metadata__.get('chat_id') if __metadata__ else None
-        token = None
         headers = self._get_user_info_headers(__user__, chat_id)
-        if headers:
-            token = user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
+        token = None
+        token = user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
 
         try:
             if __user__ is None:
@@ -1245,13 +1244,11 @@ class Pipeline:
             print(f"outlet:{__name__}, chat_id:{chat_id}, message_id:{message_id}")
         
         # Set user headers in context variable (before any API calls)
-        token = None
         headers = self._get_user_info_headers(__user__, chat_id)
-        if headers:
-            token = user_headers_context.set(headers)
-            if self.valves.debug_print:
-                print(f"Set user headers in context: {list(headers.keys())}")
-
+        token = None
+        token = user_headers_context.set(headers)
+        if self.valves.debug_print and headers:
+            print(f"Set user headers in context: {list(headers.keys())}")
 
         try:
             user_valves: Pipeline.UserValves = __user__.get("valves", self.UserValves())

@@ -4,7 +4,7 @@ description: Action button to search and delete an episode from Graphiti knowled
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.2.1
+version: 0.2.2
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cGF0aCBkPSJNOCA5aDN2MTZIOHptNiAwaDN2MTZoLTN6bTYgMGgzdjE2aC0zeiIgZmlsbD0iIzRjNGM0YyIvPgogIDxyZWN0IHg9IjYiIHk9IjYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIzIiByeD0iMSIgZmlsbD0iIzRjNGM0YyIvPgogIDxwYXRoIGQ9Ik0xMSA2VjRhMiAyIDAgMCAxIDItMmg2YTIgMiAwIDAgMSAyIDJ2MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwYXRoIGQ9Ik03IDloMTh2MThhMiAyIDAgMCAxLTIgMkg5YTIgMiAwIDAgMS0yLTJWOXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+
 
@@ -677,8 +677,7 @@ class Action:
 
         # Set user headers in context variable
         headers = self._get_user_info_headers(__user__, chat_id)
-        if headers:
-            user_headers_context.set(headers)
+        user_headers_context.set(headers)
 
         if __event_emitter__ and user_valves.show_status:
             msg = "🔍 関連エピソードを検索中..." if is_ja else "🔍 Searching for related episodes..."
