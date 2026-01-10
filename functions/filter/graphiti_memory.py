@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.21.0
+version: 0.21.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -4527,9 +4527,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 else chat_title
             )
 
-            # Build descriptive source_description: <UTC timestamp>_Chat_<chat_id>_turn<message_count>
+            # Build descriptive source_description: <UTC timestamp>_Chat_<chat_id>_message_<user_message_id>
             timestamp_prefix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            source_description = f"{timestamp_prefix}_Chat_{chat_id}_turn{user_turn_index}"
+            user_message_id = (last_user_message or {}).get("id") or "unknown"
+            source_description = f"{timestamp_prefix}_Chat_{chat_id}_message_{user_message_id}"
 
             # Apply timeout if configured
             if self.valves.add_episode_timeout > 0:
