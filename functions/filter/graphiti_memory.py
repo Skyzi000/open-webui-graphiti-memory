@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.21.1
+version: 0.21.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -44,6 +44,7 @@ import html
 import json
 import os
 import re
+import shlex
 import time
 import traceback
 from collections import defaultdict
@@ -1044,7 +1045,7 @@ class Filter:
         """
         Handle the /graphiti-delete-entity command.
         
-        Command format: /graphiti-delete-entity UUID [EntityName]
+        Command format: /graphiti-delete-entity [--source SOURCE_ID] UUID [EntityName]
         
         This method:
         1. Parses the command to extract UUID and optional entity name
@@ -1071,64 +1072,184 @@ class Filter:
         if self.valves.debug_print:
             print(f"Processing delete command: {content[:100]}...")
         
-        # Check if read-only mode is enabled (admin override)
-        if self.valves.read_only:
-            error_msg = "読み取り専用モードが有効なため、削除できません。" if is_ja else "Cannot delete: Read-only mode is enabled."
-            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
-        
-        # Parse command: /graphiti-delete-entity UUID [EntityName]
+        # Parse command: /graphiti-delete-entity [--source SOURCE_ID] UUID [EntityName]
         # UUID is required, EntityName is optional (may contain spaces)
-        parts = content[len("/graphiti-delete-entity "):].strip().split(" ", 1)
-        if not parts or not parts[0]:
+        payload = content[len("/graphiti-delete-entity "):].strip()
+        if not payload:
             # Invalid command format
             error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
             return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
-        
-        entity_uuid = parts[0].strip()
-        entity_name = parts[1].strip() if len(parts) > 1 else entity_uuid
+
+        source_id: Optional[str] = None
+        payload_tokens: list[str] = []
+        shlex_failed = False
+        parsed_entity = False
+        try:
+            tokens = shlex.split(payload)
+        except ValueError:
+            shlex_failed = True
+            tokens = []
+
+        def _looks_like_uuid(value: str) -> bool:
+            if not value:
+                return False
+            if len(value) < 10:
+                return False
+            return all(c in "0123456789abcdef-" for c in value.lower())
+
+        def _consume_quoted_token(text: str, quote_char: str) -> tuple[Optional[str], Optional[str]]:
+            escaped = False
+            for idx in range(1, len(text)):
+                ch = text[idx]
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == quote_char:
+                    return text[: idx + 1], text[idx + 1 :]
+            return None, None
+
+        if not shlex_failed:
+            if tokens and (tokens[0] == "--source" or tokens[0].startswith("--source=")):
+                source_parts: list[str] = []
+                start_idx = 1
+                uuid_search_start = start_idx + 1
+                if tokens[0] == "--source":
+                    start_idx = 1
+                    uuid_search_start = start_idx + 1
+                else:
+                    key, value = tokens[0].split("=", 1)
+                    if value:
+                        source_parts.append(value)
+                    start_idx = 1
+                    uuid_search_start = start_idx
+
+                uuid_index = None
+                for i in range(uuid_search_start, len(tokens)):
+                    if _looks_like_uuid(tokens[i]):
+                        uuid_index = i
+                        break
+
+                if uuid_index is None:
+                    error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                    return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+                source_parts.extend(tokens[start_idx:uuid_index])
+                source_id = " ".join(part for part in source_parts if part).strip() or None
+                payload_tokens = tokens[uuid_index:]
+
+                if not source_id:
+                    error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                    return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+            else:
+                payload_tokens = tokens if tokens else []
+        else:
+            raw_payload = payload
+            if raw_payload.startswith("--source"):
+                if raw_payload.startswith("--source="):
+                    remainder = raw_payload[len("--source="):].lstrip()
+                else:
+                    remainder = raw_payload[len("--source"):].lstrip()
+
+                if not remainder:
+                    error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                    return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+                if remainder[0] in ("\"", "'"):
+                    token, rest = _consume_quoted_token(remainder, remainder[0])
+                    if not token:
+                        error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                        return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+                    raw_payload = rest.lstrip()
+                    source_token = token
+                else:
+                    parts = remainder.split(" ", 1)
+                    if len(parts) < 2:
+                        error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                        return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+                    source_token = parts[0]
+                    raw_payload = parts[1].lstrip()
+
+                if source_token.startswith('"') and source_token.endswith('"'):
+                    try:
+                        source_id = json.loads(source_token)
+                    except Exception:
+                        source_id = source_token[1:-1]
+                elif source_token.startswith("'") and source_token.endswith("'"):
+                    source_id = source_token[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+                else:
+                    source_id = source_token
+
+                if not source_id:
+                    error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                    return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+            if not raw_payload:
+                error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+            parts = raw_payload.split(" ", 1)
+            entity_uuid = parts[0].strip()
+            entity_name = parts[1].strip() if len(parts) > 1 else entity_uuid
+            payload_tokens = []
+            parsed_entity = True
+
+        if not parsed_entity and not payload_tokens:
+            parts = payload.split(" ", 1)
+            if not parts or not parts[0]:
+                error_msg = "無効な削除コマンドです。形式: /graphiti-delete-entity UUID" if is_ja else "Invalid delete command. Format: /graphiti-delete-entity UUID"
+                return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+            entity_uuid = parts[0].strip()
+            entity_name = parts[1].strip() if len(parts) > 1 else entity_uuid
+        elif not parsed_entity:
+            entity_uuid = payload_tokens[0].strip()
+            entity_name = " ".join(payload_tokens[1:]).strip() if len(payload_tokens) > 1 else entity_uuid
+
+        # Route by source_id if provided (only matching filter should handle)
+        filter_source_id = self.valves.citation_source_id or self._cached_filter_id or "graphiti-memory"
+        if source_id and source_id != filter_source_id:
+            if self.valves.debug_print:
+                print(f"Delete command source_id mismatch (got={source_id}, expected={filter_source_id}); skipping")
+            return body
         
         # Validate UUID format (basic check)
         if len(entity_uuid) < 10 or not all(c in "0123456789abcdef-" for c in entity_uuid.lower()):
             error_msg = f"無効なUUID形式です: {entity_uuid}" if is_ja else f"Invalid UUID format: {entity_uuid}"
             return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
-        
-        # Get identifiers for deduplication
+
         chat_id = __metadata__.get("chat_id", "unknown") if __metadata__ else "unknown"
-        
-        # Try to acquire delete lock (prevents duplicate execution when multiple models run)
-        # Note: We only use chat_id + entity_uuid, not message_id, because each model
-        # gets a unique message_id which would break deduplication
-        if not await self._try_acquire_delete_lock(chat_id, entity_uuid):
-            # Another model already processing this delete
-            if self.valves.debug_print:
-                print(f"Delete already being processed by another model: {entity_uuid}")
-            skip_msg = f"エンティティ「{entity_name}」の削除は既に別のモデルが処理中です。" if is_ja else f"Deletion of entity \"{entity_name}\" is already being processed by another model."
-            return self._build_delete_response_body(body, skip_msg, success=True, is_ja=is_ja, skipped=True)
-        
+
+        # If the command explicitly targets this source, honor read-only immediately
+        if source_id is not None and self.valves.read_only:
+            error_msg = "読み取り専用モードが有効なため、削除できません。" if is_ja else "Cannot delete: Read-only mode is enabled."
+            return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
         # Initialize Graphiti if needed
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
-            await self._release_delete_lock(chat_id, entity_uuid)
             error_msg = "Graphitiが利用できないため、削除できません。" if is_ja else "Cannot delete: Graphiti is unavailable."
             return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
         
         # Set user headers for API calls
         headers = self._get_user_info_headers(__user__, chat_id)
         user_headers_context.set(headers)
+
+        lock_acquired = False
+        if source_id is not None:
+            # Acquire lock early for explicitly targeted deletes to avoid race conditions
+            if not await self._try_acquire_delete_lock(chat_id, entity_uuid):
+                if self.valves.debug_print:
+                    print(f"Delete already being processed by another model: {entity_uuid}")
+                skip_msg = f"エンティティ「{entity_name}」の削除は既に別のモデルが処理中です。" if is_ja else f"Deletion of entity \"{entity_name}\" is already being processed by another model."
+                return self._build_delete_response_body(body, skip_msg, success=True, is_ja=is_ja, skipped=True)
+            lock_acquired = True
         
         # NOTE: Confirmation is handled by JavaScript UI (two-click confirmation on the
         # delete button) before sending this command. We don't use __event_call__ here
         # because in multi-model scenarios, the model that loses the lock race finishes
         # first, which can invalidate the __event_call__ for the model that won the lock.
-        
-        # Execute deletion
-        if user_valves.show_status:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {"description": f"削除中: {entity_name}..." if is_ja else f"Deleting: {entity_name}...", "done": False},
-                }
-            )
-        
+
         try:
             # Get user's group_id for authorization
             group_id = self._get_group_id(__user__) if __user__ else None
@@ -1139,7 +1260,13 @@ class Filter:
                 nodes = await EntityNode.get_by_uuids(self.graphiti.driver, [entity_uuid])
                 
                 if not nodes:
-                    await self._release_delete_lock(chat_id, entity_uuid)
+                    if source_id is None:
+                        if self.valves.debug_print:
+                            print(f"Entity not found without source_id; passing through: {entity_uuid}")
+                        return body
+                    if lock_acquired:
+                        await self._release_delete_lock(chat_id, entity_uuid)
+                        lock_acquired = False
                     error_msg = f"エンティティが見つかりません: {entity_uuid}" if is_ja else f"Entity not found: {entity_uuid}"
                     return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
                 
@@ -1148,16 +1275,49 @@ class Filter:
                 # Check group_id authorization
                 entity_group_id = getattr(entity, "group_id", None)
                 if group_id and entity_group_id and entity_group_id != group_id:
-                    await self._release_delete_lock(chat_id, entity_uuid)
+                    if lock_acquired:
+                        await self._release_delete_lock(chat_id, entity_uuid)
+                        lock_acquired = False
                     error_msg = "このエンティティを削除する権限がありません。" if is_ja else "You don't have permission to delete this entity."
                     return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
                     
             except Exception as e:
-                await self._release_delete_lock(chat_id, entity_uuid)
+                if lock_acquired:
+                    await self._release_delete_lock(chat_id, entity_uuid)
+                    lock_acquired = False
                 if self.valves.debug_print:
                     print(f"Error fetching entity: {e}")
                 error_msg = f"エンティティの確認に失敗しました: {e}" if is_ja else f"Failed to verify entity: {e}"
                 return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+            # Check if read-only mode is enabled (admin override)
+            if self.valves.read_only:
+                if lock_acquired:
+                    await self._release_delete_lock(chat_id, entity_uuid)
+                    lock_acquired = False
+                error_msg = "読み取り専用モードが有効なため、削除できません。" if is_ja else "Cannot delete: Read-only mode is enabled."
+                return self._build_delete_response_body(body, error_msg, success=False, is_ja=is_ja)
+
+            if source_id is None:
+                # Try to acquire delete lock (prevents duplicate execution when multiple models run)
+                # Note: We only use chat_id + entity_uuid, not message_id, because each model
+                # gets a unique message_id which would break deduplication
+                if not await self._try_acquire_delete_lock(chat_id, entity_uuid):
+                    # Another model already processing this delete
+                    if self.valves.debug_print:
+                        print(f"Delete already being processed by another model: {entity_uuid}")
+                    skip_msg = f"エンティティ「{entity_name}」の削除は既に別のモデルが処理中です。" if is_ja else f"Deletion of entity \"{entity_name}\" is already being processed by another model."
+                    return self._build_delete_response_body(body, skip_msg, success=True, is_ja=is_ja, skipped=True)
+                lock_acquired = True
+
+            # Execute deletion
+            if user_valves.show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": f"削除中: {entity_name}..." if is_ja else f"Deleting: {entity_name}...", "done": False},
+                    }
+                )
             
             # Delete the entity using EntityNode.delete_by_uuids()
             # This also deletes connected edges via Cypher query
@@ -1178,7 +1338,8 @@ class Filter:
             return self._build_delete_response_body(body, success_msg, success=True, is_ja=is_ja, entity_name=entity_name)
             
         except Exception as e:
-            await self._release_delete_lock(chat_id, entity_uuid)
+            if lock_acquired:
+                await self._release_delete_lock(chat_id, entity_uuid)
             if self.valves.debug_print:
                 print(f"Delete failed: {e}")
                 traceback.print_exc()
@@ -2821,6 +2982,7 @@ body {
         entity_uuid = entity.get("uuid")
         delete_controls = ""
         if entity_uuid and self.valves.enable_entity_delete_button:
+            source_id = self.valves.citation_source_id or self._cached_filter_id or "graphiti-memory"
             if is_japanese:
                 delete_tooltip = "このエンティティを削除します。\n2回クリックで実行されます。"
                 delete_btn_label = "削除"
@@ -2828,7 +2990,7 @@ body {
                 delete_tooltip = "Delete this entity.\nClick twice to confirm."
                 delete_btn_label = "Delete"
             # Note: title attribute supports literal newlines, don't escape the tooltip
-            delete_controls = f"""<button class="action-btn danger" title="{delete_tooltip}" data-graphiti-entity-delete="{self._escape_html_text(entity_uuid)}" data-graphiti-entity-name="{self._escape_html_text(entity.get('name'))}">{delete_btn_label}</button>"""
+            delete_controls = f"""<button class="action-btn danger" title="{delete_tooltip}" data-graphiti-entity-delete="{self._escape_html_text(entity_uuid)}" data-graphiti-entity-name="{self._escape_html_text(entity.get('name'))}" data-graphiti-source-id="{self._escape_html_text(source_id)}">{delete_btn_label}</button>"""
 
         max_cards = 4
         cards: list[str] = []
@@ -2920,8 +3082,10 @@ body {
   const buttons = document.querySelectorAll('[data-graphiti-entity-delete]');
   if (!buttons || buttons.length === 0) return;
 
-  const sendCommand = (uuid, name) => {{
-    const command = '/graphiti-delete-entity ' + uuid + ' ' + name;
+  const sendCommand = (uuid, name, sourceId) => {{
+    const trimmedSource = (sourceId || '').trim();
+    const sourcePart = trimmedSource ? ' --source ' + JSON.stringify(trimmedSource) : '';
+    const command = '/graphiti-delete-entity' + sourcePart + ' ' + uuid + ' ' + name;
     let targetOrigin = window.location?.origin || '*';
     if (!targetOrigin || targetOrigin === 'null') targetOrigin = '*';
     try {{
@@ -2955,6 +3119,7 @@ body {
     btn.addEventListener('click', () => {{
       const uuid = btn.getAttribute('data-graphiti-entity-delete');
       const name = btn.getAttribute('data-graphiti-entity-name') || 'entity';
+      const sourceId = btn.getAttribute('data-graphiti-source-id') || '';
       if (!uuid) return;
 
       if (!confirmPending) {{
@@ -2970,7 +3135,7 @@ body {
         btn.disabled = true;
         btn.textContent = '{deleting_label}';
         btn.classList.remove('confirming');
-        sendCommand(uuid, name);
+        sendCommand(uuid, name, sourceId);
       }}
     }});
   }});
