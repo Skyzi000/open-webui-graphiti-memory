@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.21.2
+version: 0.21.3
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -39,6 +39,7 @@ Architecture:
 
 import asyncio
 import contextvars
+import copy
 import hashlib
 import html
 import json
@@ -614,10 +615,18 @@ class Filter:
         # Ensures only one model executes the delete when multiple models run simultaneously
         self._processed_deletes: dict[tuple[str, str], float] = {}
         self._deletes_lock = asyncio.Lock()
+        # Strong references to background tasks to prevent GC before completion
+        self._background_tasks: set[asyncio.Task] = set()
         # Defer Graphiti initialization until inlet()/outlet() needs it
         if self.valves.debug_print:
             print("Graphiti initialization deferred until first use")
-    
+
+    def _launch_background_task(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
     def _get_config_hash(self) -> str:
         """
         Generate a hash of current configuration to detect changes.
@@ -4405,12 +4414,6 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory storage.")
             return body
 
-        # Check if graphiti is initialized, retry if not
-        if not await self._ensure_graphiti_initialized() or self.graphiti is None:
-            if self.valves.debug_print:
-                print("Graphiti initialization failed. Skipping memory addition.")
-            return body
-
         if __user__ is None:
             if self.valves.debug_print:
                 print("User information is not available. Skipping memory addition.")
@@ -4429,17 +4432,92 @@ window.addEventListener('resize', renderGraph, { passive: true });
         messages = body.get("messages", [])
         if len(messages) == 0:
             return body
-        
+
+        # Snapshot body to prevent data races with subsequent filter mutations
+        body_snapshot = copy.deepcopy(body)
+
+        # Capture reference_time now so that even if the background task runs
+        # later (or out-of-order across workers), the Graphiti episode gets the
+        # correct chronological timestamp.
+        reference_time = datetime.now(timezone.utc)
+
+        self._launch_background_task(
+            self._save_memory_background(
+                body=body_snapshot,
+                __event_emitter__=__event_emitter__,
+                __user__=__user__,
+                __metadata__=__metadata__,
+                user_valves=user_valves,
+                filter_id_for_prefix=filter_id_for_prefix,
+                reference_time=reference_time,
+            )
+        )
+        return body
+
+    async def _save_memory_background(
+        self,
+        body: dict,
+        __event_emitter__: Callable[[Any], Awaitable[None]],
+        __user__: dict,
+        __metadata__: Optional[dict],
+        user_valves: "Filter.UserValves",
+        filter_id_for_prefix: str,
+        reference_time: datetime,
+    ) -> None:
+        try:
+            await self._save_memory_background_inner(
+                body=body,
+                __event_emitter__=__event_emitter__,
+                __user__=__user__,
+                __metadata__=__metadata__,
+                user_valves=user_valves,
+                filter_id_for_prefix=filter_id_for_prefix,
+                reference_time=reference_time,
+            )
+        except Exception:
+            traceback.print_exc()
+            try:
+                if user_valves.show_status:
+                    is_ja = self._is_japanese_preferred(user_valves)
+                    msg = "❌ バックグラウンドメモリ保存で予期しないエラーが発生しました" if is_ja else "❌ Unexpected error in background memory save"
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {"description": msg, "done": True},
+                        }
+                    )
+            except Exception:
+                traceback.print_exc()
+
+    async def _save_memory_background_inner(
+        self,
+        body: dict,
+        __event_emitter__: Callable[[Any], Awaitable[None]],
+        __user__: dict,
+        __metadata__: Optional[dict],
+        user_valves: "Filter.UserValves",
+        filter_id_for_prefix: str,
+        reference_time: datetime,
+    ) -> None:
+        # Initialize graphiti in background to avoid blocking outlet()
+        if not await self._ensure_graphiti_initialized() or self.graphiti is None:
+            if self.valves.debug_print:
+                print("Graphiti initialization failed. Skipping memory addition.")
+            return
+
+        messages = body.get("messages", [])
+        chat_id = __metadata__.get('chat_id', 'unknown') if __metadata__ else 'unknown'
+
         # Determine which messages to save based on settings
         messages_to_save = []
-        
+
         # Find the last user message, last assistant message, previous assistant message,
         # and the user message before previous_assistant (to check if it was a skip-worthy command)
         last_user_message = None
         last_assistant_message = None
         previous_assistant_message = None
         user_before_previous_assistant = None
-        
+
         for msg in reversed(messages):
             if msg.get("role") == "user" and last_user_message is None:
                 last_user_message = msg
@@ -4472,10 +4550,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 except Exception as e:
                     if self.valves.debug_print:
                         print(f"Failed to enrich previous_assistant message from DB: {e}")
-        
+
         # Get skip_save_regex pattern once for reuse
         skip_pattern = getattr(user_valves, "skip_save_regex", "")
-        
+
         # Check if user message matches skip pattern - if so, skip the ENTIRE turn
         # This ensures that both the user's command and the assistant's response are not saved
         # (e.g., deletion requests and their confirmations)
@@ -4495,8 +4573,8 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         "data": {"description": skip_msg, "done": True},
                     }
                 )
-            return body
-        
+            return
+
         # Build messages_to_save list based on UserValves settings
         if user_valves.save_previous_assistant_message and previous_assistant_message:
             # Check if the user message that triggered this assistant response was a skip-worthy command
@@ -4509,7 +4587,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 previous_assistant_content = self._get_content_from_message(previous_assistant_message)
                 if previous_assistant_content:
                     messages_to_save.append(("previous_assistant", previous_assistant_content, previous_assistant_message))
-        
+
         user_content_block = ""
         if user_valves.save_user_message and last_user_message:
             user_content_block = self._get_content_from_message(last_user_message) or ""
@@ -4529,24 +4607,24 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         )
                     else:
                         user_content_block = f"Retrieved Context:\n{rag_context_block}"
-        
+
         if user_valves.save_user_message and last_user_message:
             if user_content_block:
                 messages_to_save.append(("user", user_content_block, None))
-        
+
         if user_valves.save_assistant_response and last_assistant_message:
             assistant_content = self._get_content_from_message(last_assistant_message)
             if assistant_content:
                 messages_to_save.append(("assistant", assistant_content, last_assistant_message))
-        
+
         if len(messages_to_save) == 0:
-            return body
-        
+            return
+
         # Construct episode body in "Assistant: {message}\nUser: {message}\nAssistant: {message}" format for EpisodeType.message
         # Sort messages to maintain chronological order: previous_assistant -> user -> assistant
         role_order = {"previous_assistant": 0, "user": 1, "assistant": 2}
         messages_to_save.sort(key=lambda x: role_order.get(x[0], 99))
-        
+
         episode_parts = []
         for role, content, message_obj in messages_to_save:
             if role == "user":
@@ -4588,7 +4666,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
 
         separator = "\n\n---\n\n"
         episode_body = separator.join(episode_parts)
-        
+
         if user_valves.show_status:
             is_ja = self._is_japanese_preferred(user_valves)
             adding_msg = "✍️ 会話をGraphitiメモリに追加中..." if is_ja else "✍️ Adding conversation to Graphiti memory..."
@@ -4598,7 +4676,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                     "data": {"description": adding_msg, "done": False},
                 }
             )
-        
+
         # Generate group_id using configured method (email or user ID)
         group_id = self._get_group_id(__user__)
         saved_count = 0
@@ -4646,7 +4724,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                                         "data": {"description": skip_msg, "done": True},
                                     }
                                 )
-                            return body
+                            return
                         episode_key = dedup_key_str
                         episode_dedup_added = True
                     except Exception as e:
@@ -4671,7 +4749,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                                     "data": {"description": skip_msg, "done": True},
                                 }
                             )
-                        return body
+                        return
 
                     # Mark as processed immediately (before add_episode starts)
                     self._processed_episodes[episode_key] = time.time()
@@ -4693,7 +4771,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
             )
 
             # Build descriptive source_description: <UTC timestamp>_Chat_<chat_id>_message_<user_message_id>
-            timestamp_prefix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            timestamp_prefix = reference_time.strftime("%Y%m%dT%H%M%SZ")
             user_message_id = (last_user_message or {}).get("id") or "unknown"
             source_description = f"{timestamp_prefix}_Chat_{chat_id}_message_{user_message_id}"
 
@@ -4706,7 +4784,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description=source_description,
-                            reference_time=datetime.now(timezone.utc),
+                            reference_time=reference_time,
                             group_id=group_id,
                             update_communities=self.valves.update_communities,
                         ),
@@ -4719,7 +4797,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                             episode_body=episode_body,
                             source=EpisodeType.message,
                             source_description=source_description,
-                            reference_time=datetime.now(timezone.utc),
+                            reference_time=reference_time,
                             update_communities=self.valves.update_communities,
                         ),
                         timeout=self.valves.add_episode_timeout
@@ -4731,7 +4809,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         episode_body=episode_body,
                         source=EpisodeType.message,
                         source_description=source_description,
-                        reference_time=datetime.now(timezone.utc),
+                        reference_time=reference_time,
                         group_id=group_id,
                         update_communities=self.valves.update_communities,
                     )
@@ -4741,7 +4819,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         episode_body=episode_body,
                         source=EpisodeType.message,
                         source_description=source_description,
-                        reference_time=datetime.now(timezone.utc),
+                        reference_time=reference_time,
                         update_communities=self.valves.update_communities,
                     )
 
@@ -4765,7 +4843,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                                 "data": {"description": f"{emoji} {label} {idx}/{len(add_results.edges)}: {edge.fact}", "done": False},
                             }
                         )
-                
+
                 # Show all entities
                 if add_results.nodes:
                     for idx, node in enumerate(add_results.nodes, 1):
@@ -4795,7 +4873,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
             error_type = type(e).__name__
             error_msg = str(e)
             is_ja = self._is_japanese_preferred(user_valves)
-            
+
             # Provide more specific error messages for common issues
             if "ValidationError" in error_type:
                 print(f"Graphiti LLM response validation error for conversation: {error_msg}")
@@ -4806,11 +4884,11 @@ window.addEventListener('resize', renderGraph, { passive: true });
             else:
                 print(f"Graphiti error adding conversation: {e}")
                 user_msg = f"Graphiti: メモリ保存に失敗しました ({error_type})" if is_ja else f"Graphiti: Memory save failed ({error_type})"
-            
+
             # Only print full traceback for unexpected errors
             if "ValidationError" not in error_type:
                 traceback.print_exc()
-            
+
             if user_valves.show_status:
                 warning_label = "警告" if is_ja else "Warning"
                 await __event_emitter__(
@@ -4832,10 +4910,6 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 elif isinstance(episode_key, tuple):
                     async with self._episodes_lock:
                         self._processed_episodes.pop(episode_key, None)
-        
-        # Only increment count for successfully saved messages
-        if saved_count > 0:
-            pass  # Successfully saved messages
 
         if user_valves.show_status:
             is_ja = self._is_japanese_preferred(user_valves)
@@ -4868,12 +4942,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         status_msg = status_parts[0]
                 else:
                     status_msg = status_parts[0]
-            
+
             await __event_emitter__(
                 {
                     "type": "status",
                     "data": {"description": status_msg, "done": True},
                 }
             )
-        
-        return body
