@@ -1,10 +1,10 @@
 """
 title: Delete Graphiti Memory Action Button
-description: Action button to search and delete an episode from Graphiti knowledge graph memory based on clicked message content.
+description: Action button to delete an episode from Graphiti knowledge graph memory by matching the clicked message's ID.
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.2.3
+version: 0.3.0
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cGF0aCBkPSJNOCA5aDN2MTZIOHptNiAwaDN2MTZoLTN6bTYgMGgzdjE2aC0zeiIgZmlsbD0iIzRjNGM0YyIvPgogIDxyZWN0IHg9IjYiIHk9IjYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIzIiByeD0iMSIgZmlsbD0iIzRjNGM0YyIvPgogIDxwYXRoIGQ9Ik0xMSA2VjRhMiAyIDAgMCAxIDItMmg2YTIgMiAwIDAgMSAyIDJ2MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwYXRoIGQ9Ik03IDloMTh2MThhMiAyIDAgMCAxLTIgMkg5YTIgMiAwIDAgMS0yLTJWOXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+
 
@@ -14,7 +14,7 @@ Note on FalkorDB backend:
 
 Design:
 - Main class: Action
-- Searches for the episode matching the clicked message content
+- Finds the episode matching the clicked message's ID via direct database query
 - Shows confirmation dialog with the found episode
 - Deletes the episode after user confirmation
 """
@@ -36,22 +36,8 @@ from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-from graphiti_core.search.search_config import (
-    SearchConfig,
-    EdgeSearchConfig,
-    NodeSearchConfig,
-    EpisodeSearchConfig,
-    EdgeSearchMethod,
-    NodeSearchMethod,
-    EpisodeSearchMethod,
-    EdgeReranker,
-    NodeReranker,
-    EpisodeReranker,
-)
-from graphiti_core.search.search_config_recipes import (
-    COMBINED_HYBRID_SEARCH_RRF,
-    COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
-)
+from graphiti_core.models.nodes.node_db_queries import EPISODIC_NODE_RETURN
+from graphiti_core.nodes import EpisodicNode, get_episodic_node_from_record
 from openai import AsyncOpenAI
 
 # Context variable to store user-specific headers for each async request
@@ -60,6 +46,42 @@ from openai import AsyncOpenAI
 user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
     'user_headers', default=None
 )
+
+
+async def find_episodes_by_message_id(
+    driver, user_message_id: str, group_id: str | None,
+) -> list[EpisodicNode]:
+    """Find episodic nodes by message ID via direct Cypher query.
+
+    Searches two storage formats:
+    - Filter: source_description contains '_message_{user_message_id}'
+    - Pipeline: name contains '_{user_message_id}'
+    """
+    sd_pattern = f"_message_{user_message_id}"
+    name_pattern = f"_{user_message_id}"
+
+    group_filter = "\nAND e.group_id = $group_id" if group_id is not None else ""
+
+    query = (
+        """
+        MATCH (e:Episodic)
+        WHERE (e.source_description CONTAINS $sd_pattern OR e.name CONTAINS $name_pattern)
+        """
+        + group_filter
+        + "\nRETURN\n"
+        + EPISODIC_NODE_RETURN
+    )
+
+    params: dict = {
+        "sd_pattern": sd_pattern,
+        "name_pattern": name_pattern,
+    }
+    if group_id is not None:
+        params["group_id"] = group_id
+
+    records, _, _ = await driver.execute_query(query, **params, routing_="r")
+
+    return [get_episodic_node_from_record(record) for record in records]
 
 
 class MultiUserOpenAIClient(OpenAIClient):
@@ -234,21 +256,6 @@ class Action:
             description="Forward user information headers to OpenAI API. Options: 'default', 'true', 'false'.",
         )
 
-        max_search_message_length: int = Field(
-            default=512,
-            description="Maximum length of message content to use for searching related episodes. Longer content is truncated.",
-        )
-
-        sanitize_search_query: bool = Field(
-            default=True,
-            description="Sanitize search queries to avoid FalkorDB/RediSearch syntax errors by removing special characters like @, :, \", (, ). Disable if you want to use raw queries or if using a different backend.",
-        )
-
-        search_strategy: str = Field(
-            default="balanced",
-            description="Search strategy: 'fast' (BM25 only, ~0.1s), 'balanced' (BM25+Cosine, ~0.5s), 'quality' (Cross-Encoder, ~1-5s)",
-        )
-
         debug_print: bool = Field(
             default=False,
             description="Enable debug printing to console.",
@@ -257,10 +264,6 @@ class Action:
     class UserValves(BaseModel):
         show_status: bool = Field(
             default=True, description="Show status of the action."
-        )
-        search_candidates: int = Field(
-            default=50,
-            description="Number of candidate episodes to retrieve from semantic search before local content matching.",
         )
         confirmation_timeout: int = Field(
             default=60,
@@ -473,110 +476,8 @@ class Action:
         
         return headers
 
-    def _get_content_from_message(self, message: dict) -> Optional[str]:
-        content = message.get("content")
-
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    return item.get("text", "")
-            return ""
-
-        return content if isinstance(content, str) else ""
-
-    def _calculate_content_similarity(self, query: str, episode_content: str) -> float:
-        """
-        Calculate similarity score between query and episode content.
-        Uses substring matching and common word overlap.
-        Returns a score between 0 and 1.
-        """
-        query_lower = query.lower()
-        content_lower = episode_content.lower()
-
-        # Check for exact substring match (highest priority)
-        if query_lower in content_lower or content_lower in query_lower:
-            # Calculate overlap ratio
-            shorter = min(len(query_lower), len(content_lower))
-            longer = max(len(query_lower), len(content_lower))
-            return 0.8 + (0.2 * shorter / longer)
-
-        # Word-based overlap
-        query_words = set(query_lower.split())
-        content_words = set(content_lower.split())
-
-        if not query_words or not content_words:
-            return 0.0
-
-        # Jaccard similarity
-        intersection = query_words & content_words
-        union = query_words | content_words
-
-        return len(intersection) / len(union) if union else 0.0
-
-    def _sanitize_search_query(self, query: str) -> str:
-        """
-        Sanitize search query to avoid FalkorDB/RediSearch syntax errors.
-
-        Only removes the most problematic characters that cause RediSearch errors.
-        Keeps most punctuation to preserve query meaning.
-        """
-        # Remove characters that cause RediSearch syntax errors:
-        # @ - field prefix
-        # : - field separator
-        # " - quote operator
-        # ( ) - grouping operators
-        # | - OR operator
-        sanitized = re.sub(r'[@:"()|]', ' ', query)
-
-        # Replace multiple spaces with single space
-        sanitized = re.sub(r'\s+', ' ', sanitized)
-
-        # Trim whitespace
-        sanitized = sanitized.strip()
-
-        return sanitized
-
-    def _get_search_config(self) -> SearchConfig:
-        """Get search configuration based on the configured search strategy."""
-        strategy = self.valves.search_strategy.lower()
-
-        if strategy == "fast":
-            # BM25 only - fastest, no embedding calls
-            return SearchConfig(
-                edge_config=EdgeSearchConfig(
-                    search_methods=[EdgeSearchMethod.bm25],
-                    reranker=EdgeReranker.rrf,
-                ),
-                node_config=NodeSearchConfig(
-                    search_methods=[NodeSearchMethod.bm25],
-                    reranker=NodeReranker.rrf,
-                ),
-                episode_config=EpisodeSearchConfig(
-                    search_methods=[EpisodeSearchMethod.bm25],
-                    reranker=EpisodeReranker.rrf,
-                ),
-            )
-        elif strategy == "quality":
-            # Cross-encoder - highest quality, slowest
-            return COMBINED_HYBRID_SEARCH_CROSS_ENCODER
-        else:
-            # Default: balanced (BM25 + Cosine Similarity + RRF)
-            # Best speed/quality tradeoff for most use cases
-            return COMBINED_HYBRID_SEARCH_RRF
-
     def _is_japanese_preferred(self, user_valves: "Action.UserValves") -> bool:
-        """
-        Check if user prefers Japanese language based on UserValves settings.
-
-        Args:
-            user_valves: UserValves object with ui_language setting
-
-        Returns:
-            True if user prefers Japanese (ja), False otherwise (default: English)
-        """
-        if hasattr(user_valves, 'ui_language'):
-            return user_valves.ui_language.lower() == 'ja'
-        return False
+        return user_valves.ui_language.lower() == 'ja'
 
     async def action(
         self,
@@ -667,19 +568,10 @@ class Action:
                 )
             return None
 
-        # Extract content from user and assistant messages
-        user_content = self._get_content_from_message(last_user_message) if last_user_message else ""
-        assistant_content = self._get_content_from_message(last_assistant_message) if last_assistant_message else ""
-
-        if self.valves.debug_print:
-            print(f"=== Delete Action: Message Analysis ===")
-            print(f"Total messages in body: {len(messages)}")
-            print(f"User content (first 100 chars): {user_content[:100] if user_content else 'N/A'}...")
-            print(f"Assistant content (first 100 chars): {assistant_content[:100] if assistant_content else 'N/A'}...")
-
-        if not user_content and not assistant_content:
+        user_message_id = last_user_message.get("id") if last_user_message else None
+        if not user_message_id:
             if __event_emitter__ and user_valves.show_status:
-                msg = "❌ メッセージ内容が空です" if is_ja else "❌ Message content is empty"
+                msg = "❌ メッセージIDが見つかりません" if is_ja else "❌ Message ID not found"
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -695,7 +587,7 @@ class Action:
         user_headers_context.set(headers)
 
         if __event_emitter__ and user_valves.show_status:
-            msg = "🔍 関連エピソードを検索中..." if is_ja else "🔍 Searching for related episodes..."
+            msg = "🔍 エピソードを検索中..." if is_ja else "🔍 Searching for episodes..."
             await __event_emitter__(
                 {
                     "type": "status",
@@ -704,58 +596,23 @@ class Action:
             )
 
         try:
-            # Search for episodes matching the message content
             group_id = self._get_group_id(__user__)
-            search_config = self._get_search_config()
-            max_len = self.valves.max_search_message_length
-
-            # Search separately with user and assistant content to handle both filter settings
-            # (save_user_message=True or save_assistant_response=True)
-            all_candidates = {}  # uuid -> episode (dedupe)
-
-            for content_type, content in [("user", user_content), ("assistant", assistant_content)]:
-                if not content:
-                    continue
-
-                search_query = content
-                if self.valves.sanitize_search_query:
-                    search_query = self._sanitize_search_query(search_query)
-                    if not search_query:
-                        continue
-
-                if len(search_query) > max_len:
-                    search_query = search_query[:max_len]
-
-                if self.valves.debug_print:
-                    print(f"=== Searching with {content_type} content ===")
-                    print(f"Query length: {len(search_query)} chars")
-                    print(f"Query (first 150 chars): {search_query[:150]}...")
-
-                if group_id is not None:
-                    search_results = await self.graphiti.search_(
-                        query=search_query,
-                        group_ids=[group_id],
-                        config=search_config,
-                    )
-                else:
-                    search_results = await self.graphiti.search_(
-                        query=search_query,
-                        config=search_config,
-                    )
-
-                if search_results and search_results.episodes:
-                    for ep in search_results.episodes[:user_valves.search_candidates]:
-                        all_candidates[ep.uuid] = ep
-
-            candidates = list(all_candidates.values())
+            episodes = await find_episodes_by_message_id(
+                self.graphiti.driver, user_message_id, group_id,
+            )
 
             if self.valves.debug_print:
-                print(f"=== Combined Search Results ===")
-                print(f"Total unique candidates: {len(candidates)}")
+                print(f"=== Episode Search by Message ID ===")
+                print(f"Message ID: {user_message_id}")
+                print(f"Group ID: {group_id}")
+                print(f"Found {len(episodes)} episode(s)")
+                for ep in episodes:
+                    content_snippet = ep.content[:150] + "..." if len(ep.content) > 150 else ep.content
+                    print(f"  - {ep.name}: {content_snippet}")
 
-            if not candidates:
+            if not episodes:
                 if __event_emitter__ and user_valves.show_status:
-                    msg = "ℹ️ 関連エピソードが見つかりませんでした" if is_ja else "ℹ️ No related episodes found"
+                    msg = "ℹ️ 対応するエピソードが見つかりませんでした" if is_ja else "ℹ️ No matching episodes found"
                     await __event_emitter__(
                         {
                             "type": "status",
@@ -764,63 +621,39 @@ class Action:
                     )
                 return None
 
-            # Local content matching - find best match by string similarity
-            # Try both user and assistant content separately, use the better score
-            scored_episodes = []
-            for ep in candidates:
-                scores = []
-                if user_content:
-                    scores.append(self._calculate_content_similarity(user_content, ep.content))
-                if assistant_content:
-                    scores.append(self._calculate_content_similarity(assistant_content, ep.content))
-                similarity = max(scores) if scores else 0.0
-                scored_episodes.append((ep, similarity))
-
-            # Sort by similarity score (highest first)
-            scored_episodes.sort(key=lambda x: x[1], reverse=True)
-
-            if self.valves.debug_print:
-                print(f"=== Local Content Matching ===")
-                for idx, (ep, score) in enumerate(scored_episodes[:5], 1):
-                    print(f"  [{idx}] Score: {score:.3f} - {ep.name}")
-                    print(f"      Content (first 150 chars): {ep.content[:150]}...")
-
-            # Get the best match
-            best_match, best_score = scored_episodes[0]
-
-            if self.valves.debug_print:
-                print(f"=== Best Match ===")
-                print(f"Score: {best_score:.3f}")
-                print(f"Name: {best_match.name}")
-                print(f"Content: {best_match.content[:300]}...")
-
-            # Use list for consistency with confirmation dialog
-            episodes = [best_match]
-
             # Build confirmation message
-            content_preview = best_match.content[:200] + "..." if len(best_match.content) > 200 else best_match.content
+            if len(episodes) == 1:
+                ep = episodes[0]
+                content_preview = ep.content[:200] + "..." if len(ep.content) > 200 else ep.content
+                episodes_text = f"{ep.name}:\n{content_preview}"
+            else:
+                parts = []
+                for i, ep in enumerate(episodes, 1):
+                    content_preview = ep.content[:200] + "..." if len(ep.content) > 200 else ep.content
+                    parts.append(f"{i}. {ep.name}:\n{content_preview}")
+                episodes_text = "\n\n".join(parts)
 
             if is_ja:
-                confirmation_message = f"""エピソードが見つかりました (一致度: {best_score:.1%}):
+                header = "エピソードが見つかりました:" if len(episodes) == 1 else f"{len(episodes)}件のエピソードが見つかりました:"
+                confirmation_message = f"""{header}
 
-{best_match.name}:
-{content_preview}
+{episodes_text}
 
 ---
 この操作は取り消せません。"""
                 confirmation_title = "🗑️ メモリからエピソードを削除"
             else:
-                confirmation_message = f"""Found episode (similarity: {best_score:.1%}):
+                header = "Found episode:" if len(episodes) == 1 else f"Found {len(episodes)} episodes:"
+                confirmation_message = f"""{header}
 
-{best_match.name}:
-{content_preview}
+{episodes_text}
 
 ---
 This operation cannot be undone."""
                 confirmation_title = "🗑️ Delete Episode from Memory"
 
             if __event_emitter__ and user_valves.show_status:
-                msg = f"⏳ エピソードが見つかりました (一致度: {best_score:.0%}). 確認待ち..." if is_ja else f"⏳ Found episode (similarity: {best_score:.0%}). Waiting for confirmation..."
+                msg = f"⏳ {len(episodes)}件のエピソードが見つかりました。確認待ち..." if is_ja else f"⏳ Found {len(episodes)} episode(s). Waiting for confirmation..."
                 await __event_emitter__(
                     {
                         "type": "status",
