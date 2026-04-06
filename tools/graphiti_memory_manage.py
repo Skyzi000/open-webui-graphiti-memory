@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.6.3
+version: 0.6.4
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -2015,13 +2015,9 @@ class Tools:
           This makes times more intuitive for users
         - Range is start-inclusive, end-exclusive: [start_time, end_time)
 
-        :param start_time: Start of time range (ISO 8601 format with timezone). Episodes with timestamp >= this will be included.
-                           Examples: "2024-01-01T00:00:00Z", "2024-01-01T09:00:00+09:00"
-        :param end_time: End of time range (ISO 8601 format with timezone). Episodes with timestamp < this will be included.
-                         Examples: "2024-02-01T00:00:00Z", "2024-02-01T09:00:00+09:00"
-        :param time_field: (Optional) Timestamp field to filter by: "created_at" (default) or "valid_at".
-                           Usually not needed - only specify if explicitly required for special cases.
-                           Do NOT ask users about this parameter unless they specifically mention it.
+        :param start_time: Start of the time range in ISO 8601 format with timezone, for example "2024-01-01T00:00:00Z" or "2024-01-01T09:00:00+09:00"; episodes with timestamp >= this value are included.
+        :param end_time: End of the time range in ISO 8601 format with timezone, for example "2024-02-01T00:00:00Z" or "2024-02-01T09:00:00+09:00"; episodes with timestamp < this value are included.
+        :param time_field: Optional timestamp field to filter by; use "created_at" by default, use "valid_at" only when the user explicitly means event validity time rather than creation time, and do not ask about it unless needed.
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deletion status
 
