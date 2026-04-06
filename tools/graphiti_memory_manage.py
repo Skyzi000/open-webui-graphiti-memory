@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.6.4
+version: 0.6.5
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -2017,7 +2017,7 @@ class Tools:
 
         :param start_time: Start of the time range in ISO 8601 format with timezone, for example "2024-01-01T00:00:00Z" or "2024-01-01T09:00:00+09:00"; episodes with timestamp >= this value are included.
         :param end_time: End of the time range in ISO 8601 format with timezone, for example "2024-02-01T00:00:00Z" or "2024-02-01T09:00:00+09:00"; episodes with timestamp < this value are included.
-        :param time_field: Optional timestamp field to filter by; use "created_at" by default, use "valid_at" only when the user explicitly means event validity time rather than creation time, and do not ask about it unless needed.
+        :param time_field: Optional timestamp field to filter by: "created_at" (default) or "valid_at"; usually not needed, only specify it if explicitly required for special cases, and do not ask users about it unless they specifically mention it.
         :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
         :return: Result message with deletion status
 
