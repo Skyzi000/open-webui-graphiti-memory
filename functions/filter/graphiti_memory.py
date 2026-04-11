@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.21.3
+version: 0.22.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -61,7 +61,13 @@ from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-from graphiti_core.nodes import EpisodeType, EntityNode
+from graphiti_core.nodes import (
+    EpisodeType,
+    EntityNode,
+    EpisodicNode,
+    get_episodic_node_from_record,
+)
+from graphiti_core.models.nodes.node_db_queries import EPISODIC_NODE_RETURN
 from openai import AsyncOpenAI
 from redis.asyncio import Redis
 from graphiti_core.search.search_config_recipes import (
@@ -256,6 +262,50 @@ def get_filter_display_name(filter_id: str) -> Optional[str]:
     return None
 
 
+async def find_episodes_by_chat_id(
+    driver,
+    chat_id: str,
+    group_id: str | None,
+    reference_time: datetime,
+    limit: int = 10,
+) -> list[EpisodicNode]:
+    """Find recent episodic nodes for a specific chat via Cypher query.
+
+    Uses source_description pattern '_Chat_{chat_id}_' set by the filter's outlet.
+    Returns episodes ordered by valid_at DESC, limited to `limit` entries.
+    """
+    chat_pattern = f"_Chat_{chat_id}_"
+
+    group_filter = "\nAND e.group_id = $group_id" if group_id is not None else ""
+
+    query = (
+        """
+        MATCH (e:Episodic)
+        WHERE e.source_description CONTAINS $chat_pattern
+        AND e.valid_at <= $reference_time
+        """
+        + group_filter
+        + "\nRETURN\n"
+        + EPISODIC_NODE_RETURN
+        + """
+        ORDER BY e.valid_at DESC
+        LIMIT $limit
+        """
+    )
+
+    params: dict = {
+        "chat_pattern": chat_pattern,
+        "reference_time": reference_time,
+        "limit": limit,
+    }
+    if group_id is not None:
+        params["group_id"] = group_id
+
+    records, _, _ = await driver.execute_query(query, **params, routing_="r")
+
+    return [get_episodic_node_from_record(record) for record in records]
+
+
 class Filter:
     """
     Open WebUI Filter for Graphiti-based memory management.
@@ -362,6 +412,11 @@ class Filter:
         add_episode_timeout: int = Field(
             default=240,
             description="Timeout in seconds for adding episodes to memory. Set to 0 to disable timeout.",
+        )
+
+        previous_episodes_from_chat: int = Field(
+            default=10,
+            description="Number of previous episodes from the SAME chat to use as context for add_episode. Graphiti core defaults to the 10 most recent episodes globally, which can include huge file-content episodes from unrelated chats. This setting restricts context to same-chat episodes only by passing explicit previous_episode_uuids. Set to -1 to use Graphiti core's default behavior (global recent episodes). Set to 0 to pass an empty list (no previous context).",
         )
         
         semaphore_limit: int = Field(
@@ -645,6 +700,7 @@ class Filter:
                 'inject_entities',  # Memory injection settings don't affect Graphiti init
                 'update_communities',  # Community update setting doesn't affect Graphiti init
                 'add_episode_timeout',  # Timeout settings don't affect Graphiti init
+                'previous_episodes_from_chat',  # Episode context scoping doesn't affect Graphiti init
                 'max_search_message_length',  # Message truncation doesn't affect Graphiti init
                 'sanitize_search_query',  # Query sanitization doesn't affect Graphiti init
                 'memory_message_role',  # Message role doesn't affect Graphiti init
@@ -4775,53 +4831,67 @@ window.addEventListener('resize', renderGraph, { passive: true });
             user_message_id = (last_user_message or {}).get("id") or "unknown"
             source_description = f"{timestamp_prefix}_Chat_{chat_id}_message_{user_message_id}"
 
+            # Retrieve previous episode UUIDs from the same chat to avoid
+            # pulling in unrelated (potentially huge) episodes from other chats.
+            prev_ep_limit = self.valves.previous_episodes_from_chat
+            previous_episode_uuids: list[str] | None = None
+            if prev_ep_limit >= 0 and chat_id and chat_id != "unknown":
+                try:
+                    if prev_ep_limit == 0:
+                        previous_episode_uuids = []
+                    else:
+                        # Use a driver scoped to the target group_id.
+                        # add_episode clones the driver internally when
+                        # group_id != driver._database (e.g. FalkorDB),
+                        # so querying self.graphiti.driver directly may
+                        # hit the wrong graph after a process restart or
+                        # when the previous request was from another user.
+                        query_driver = self.graphiti.driver
+                        if group_id is not None and group_id != query_driver._database:
+                            query_driver = query_driver.clone(database=group_id)
+                        same_chat_episodes = await find_episodes_by_chat_id(
+                            driver=query_driver,
+                            chat_id=chat_id,
+                            group_id=group_id,
+                            reference_time=reference_time,
+                            limit=prev_ep_limit,
+                        )
+                        # NOTE: Graphiti core's EpisodicNode.get_by_uuids()
+                        # does not preserve insertion order (no ORDER BY),
+                        # so the UUID list order here is best-effort.
+                        # The query returns newest-first; we reverse to
+                        # chronological (oldest-first) so the list at least
+                        # reflects the intended order if core is ever fixed.
+                        previous_episode_uuids = [ep.uuid for ep in reversed(same_chat_episodes)]
+                    if self.valves.debug_print:
+                        print(f"Previous episodes from same chat: {len(previous_episode_uuids)} (limit={prev_ep_limit})")
+                except Exception as e:
+                    if self.valves.debug_print:
+                        print(f"Failed to retrieve same-chat episodes, falling back to core default: {e}")
+                    previous_episode_uuids = None
+
+            # Build common kwargs for add_episode
+            episode_kwargs: dict = {
+                "name": episode_name,
+                "episode_body": episode_body,
+                "source": EpisodeType.message,
+                "source_description": source_description,
+                "reference_time": reference_time,
+                "update_communities": self.valves.update_communities,
+            }
+            if group_id is not None:
+                episode_kwargs["group_id"] = group_id
+            if previous_episode_uuids is not None:
+                episode_kwargs["previous_episode_uuids"] = previous_episode_uuids
+
             # Apply timeout if configured
             if self.valves.add_episode_timeout > 0:
-                if group_id is not None:
-                    add_results = await asyncio.wait_for(
-                        self.graphiti.add_episode(
-                            name=episode_name,
-                            episode_body=episode_body,
-                            source=EpisodeType.message,
-                            source_description=source_description,
-                            reference_time=reference_time,
-                            group_id=group_id,
-                            update_communities=self.valves.update_communities,
-                        ),
-                        timeout=self.valves.add_episode_timeout
-                    )
-                else:
-                    add_results = await asyncio.wait_for(
-                        self.graphiti.add_episode(
-                            name=episode_name,
-                            episode_body=episode_body,
-                            source=EpisodeType.message,
-                            source_description=source_description,
-                            reference_time=reference_time,
-                            update_communities=self.valves.update_communities,
-                        ),
-                        timeout=self.valves.add_episode_timeout
-                    )
+                add_results = await asyncio.wait_for(
+                    self.graphiti.add_episode(**episode_kwargs),
+                    timeout=self.valves.add_episode_timeout,
+                )
             else:
-                if group_id is not None:
-                    add_results = await self.graphiti.add_episode(
-                        name=episode_name,
-                        episode_body=episode_body,
-                        source=EpisodeType.message,
-                        source_description=source_description,
-                        reference_time=reference_time,
-                        group_id=group_id,
-                        update_communities=self.valves.update_communities,
-                    )
-                else:
-                    add_results = await self.graphiti.add_episode(
-                        name=episode_name,
-                        episode_body=episode_body,
-                        source=EpisodeType.message,
-                        source_description=source_description,
-                        reference_time=reference_time,
-                        update_communities=self.valves.update_communities,
-                    )
+                add_results = await self.graphiti.add_episode(**episode_kwargs)
 
             if self.valves.debug_print:
                 print(f"Added conversation to Graphiti memory: {episode_body[:100]}...")
