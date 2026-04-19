@@ -4,33 +4,12 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.6.5
+version: 0.7.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
   FalkorDB requires additional setup due to Redis version conflicts.
   See the README for details: https://github.com/Skyzi000/open-webui-graphiti-memory#falkordb-alternative-not-recently-tested
-
-Design:
-- Main class: Tools
-- Helper class: GraphitiHelper (handles initialization, not exposed to AI)
-- Related components:
-  - Graphiti: Knowledge graph memory system
-  - FalkorDriver: FalkorDB backend driver for graph storage
-  - OpenAIClient: OpenAI client with JSON structured output support
-  - OpenAIGenericClient: Generic OpenAI-compatible client
-  - OpenAIEmbedder: Embedding model for semantic search
-
-Architecture:
-- Search and Delete: Search for specific entities, edges, or episodes, then delete them via Cypher queries
-- Episode Deletion: Uses Graphiti's remove_episode() method
-- Node/Edge Deletion: Uses driver's execute_query() with Cypher DELETE statements
-- UUID-based Deletion: Delete by UUID for precise control
-- Batch Operations: Delete multiple items at once
-- Group Isolation: Only delete from user's own memory space (respects group_id)
-
-Related Filter:
-- functions/filter/graphiti_memory.py: Main memory management filter
 """
 
 import os
@@ -1571,7 +1550,7 @@ class Tools:
                     result += f"   UUID: `{uuid}`\n"
                 result += "\n"
             
-            result += f"💡 To delete these entities, use `search_and_delete_entities` with the same query and limit."
+            result += "💡 To delete matched entities, call `delete_by_uuids(node_uuids=\"<uuid>,<uuid>,...\")`. If UUIDs are absent above, re-run with `show_uuid=True` first."
             
             return result
             
@@ -1660,7 +1639,7 @@ class Tools:
                     result += f"   UUID: `{uuid}`\n"
                 result += "\n"
             
-            result += f"💡 To delete these facts, use `search_and_delete_facts` with the same query and limit."
+            result += "💡 To delete matched facts, call `delete_by_uuids(edge_uuids=\"<uuid>,<uuid>,...\")`. If UUIDs are absent above, re-run with `show_uuid=True` first."
             
             return result
             
@@ -1768,7 +1747,7 @@ class Tools:
                 result += "\n"
 
             result += "💡 Previews may be truncated. Use `get_episode_content(uuid=\"...\")` to retrieve full content before answering if details are needed.\n\n"
-            result += f"To delete these episodes, use `search_and_delete_episodes` with the same query and limit."
+            result += "To delete matched episodes, call `delete_by_uuids(episode_uuids=\"<uuid>,<uuid>,...\")`."
 
             return result
 
@@ -2238,332 +2217,6 @@ class Tools:
                 traceback.print_exc()
             return error_msg
 
-    async def search_and_delete_entities(
-        self,
-        query: str,
-        limit: int = 1,
-        group_suffix: Optional[str] = None,
-        __user__: dict = {},
-        __event_emitter__: Optional[Callable[[dict], Any]] = None,
-        __event_call__: Optional[Callable[[dict], Any]] = None,
-    ) -> str:
-        """
-        Search for entities by name or description and delete them after user confirmation.
-        
-        This tool searches for entities (people, places, concepts) in your memory
-        and allows you to delete them along with their relationships.
-        
-        IMPORTANT: This operation requires user confirmation and cannot be undone.
-        
-        :param query: Search query to find entities (e.g., "John Smith", "Python programming")
-        :param limit: Maximum number of entities to return (default: 1, max: 100)
-        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: Result message with deleted entities count
-        """
-        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
-            return "❌ Error: Memory service is not available"
-        
-        
-        # Set user headers in context variable (before any API calls)
-        headers = get_user_info_headers(self.valves, __user__, None)
-        user_headers_context.set(headers)
-        if self.valves.debug_print and headers:
-            print(f"Set user headers in context: {list(headers.keys())}")
-        # Validate and clamp limit
-        try:
-            limit = max(1, min(100, int(limit)))
-        except (TypeError, ValueError):
-            return "❌ Error: limit must be an integer"
-        
-        try:
-            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
-            if error_msg:
-                return error_msg
-            
-            # Create a copy of config with custom limit
-            search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
-            search_config.limit = limit
-            
-            # Search for entities using search_() which returns SearchResults
-            search_results = await self.helper.graphiti.search_(
-                query=query,
-                group_ids=[group_id] if group_id else None,
-                config=search_config,
-            )
-            
-            # Extract entity nodes
-            entity_nodes = [node for node in search_results.nodes if hasattr(node, 'name')]
-            
-            if not entity_nodes:
-                return f"ℹ️ No entities found matching '{query}'"
-            
-            # Show all entities for confirmation (no limit - user must see everything being deleted)
-            total_count = len(entity_nodes)
-            
-            entity_list = []
-            preview_items = []
-            for i, node in enumerate(entity_nodes, 1):
-                summary = getattr(node, 'summary', 'No description')
-                if len(summary) > 80:
-                    summary = summary[:80] + "..."
-                entity_list.append(f"{i}. {node.name}: {summary}")
-                preview_items.append(f"[{i}] {node.name}:  \n{summary}")
-            
-            # Get user's language preference
-            is_japanese = self.helper.is_japanese_preferred(__user__)
-            
-            # Show confirmation dialog
-            confirmed, error_msg = await self.helper.show_confirmation_dialog(
-                title=f"エンティティの削除確認 ({total_count}件)" if is_japanese else f"Confirm Entity Deletion ({total_count} items)",
-                items=preview_items,
-                warning_message="⚠️ この操作は取り消すことができません。関連する関係性も削除されます。" if is_japanese else "⚠️ This operation cannot be undone. Related relationships will also be deleted.",
-                timeout=self.valves.confirmation_timeout,
-                __user__=__user__,
-                __event_call__=__event_call__,
-            )
-            
-            if not confirmed:
-                return error_msg
-            
-            # Show compact result message (list only first 10)
-            result_list = entity_list[:10]
-            result = f"🔍 Found {total_count} entities:\n" + "\n".join(result_list)
-            if total_count > 10:
-                result += f"\n... and {total_count - 10} more"
-            
-            # Delete entities using Cypher
-            entity_uuids = [node.uuid for node in entity_nodes]
-            deleted_count = await self.helper.delete_nodes_by_uuids(entity_uuids)
-            
-            result += f"\n\n✅ Deleted {deleted_count} entities and their relationships"
-            return result
-            
-        except Exception as e:
-            error_msg = f"❌ Error searching/deleting entities: {str(e)}"
-            if self.valves.debug_print:
-                traceback.print_exc()
-            return error_msg
-    
-    async def search_and_delete_facts(
-        self,
-        query: str,
-        limit: int = 1,
-        group_suffix: Optional[str] = None,
-        __user__: dict = {},
-        __event_emitter__: Optional[Callable[[dict], Any]] = None,
-        __event_call__: Optional[Callable[[dict], Any]] = None,
-    ) -> str:
-        """
-        Search for facts (relationships/edges) and delete them after user confirmation.
-        
-        This tool searches for relationships between entities (e.g., "John works at Company X")
-        and allows you to delete them.
-        
-        IMPORTANT: This operation requires user confirmation and cannot be undone.
-        
-        :param query: Search query to find relationships (e.g., "works at", "friends with")
-        :param limit: Maximum number of facts to return (default: 1, max: 100)
-        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: Result message with deleted facts count
-        """
-        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
-            return "❌ Error: Memory service is not available"
-        
-        
-        # Set user headers in context variable (before any API calls)
-        headers = get_user_info_headers(self.valves, __user__, None)
-        user_headers_context.set(headers)
-        if self.valves.debug_print and headers:
-            print(f"Set user headers in context: {list(headers.keys())}")
-        # Validate and clamp limit
-        try:
-            limit = max(1, min(100, int(limit)))
-        except (TypeError, ValueError):
-            return "❌ Error: limit must be an integer"
-        
-        try:
-            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
-            if error_msg:
-                return error_msg
-            
-            # Create a copy of config with custom limit
-            search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
-            search_config.limit = limit
-            
-            # Search for facts using search_() which returns SearchResults
-            search_results = await self.helper.graphiti.search_(
-                query=query,
-                group_ids=[group_id] if group_id else None,
-                config=search_config,
-            )
-            
-            # Extract edges (facts/relationships)
-            edges = search_results.edges
-            
-            if not edges:
-                return f"ℹ️ No facts found matching '{query}'"
-            
-            # Show all facts for confirmation (no limit - user must see everything being deleted)
-            total_count = len(edges)
-            
-            # Get user's language preference
-            is_japanese = self.helper.is_japanese_preferred(__user__)
-            
-            fact_list = []
-            preview_items = []
-            period_label = "期間" if is_japanese else "Period"
-            for i, edge in enumerate(edges, 1):
-                fact_text = getattr(edge, 'fact', 'Unknown relationship')
-                if len(fact_text) > 80:
-                    fact_text = fact_text[:80] + "..."
-                valid_at = getattr(edge, 'valid_at', 'unknown')
-                invalid_at = getattr(edge, 'invalid_at', 'present')
-                fact_list.append(f"{i}. {fact_text} ({valid_at} - {invalid_at})")
-                preview_items.append(f"[{i}] {fact_text}  \n{period_label}: {valid_at} - {invalid_at}")
-            
-            # Show confirmation dialog
-            confirmed, error_msg = await self.helper.show_confirmation_dialog(
-                title=f"関係性の削除確認 ({total_count}件)" if is_japanese else f"Confirm Fact Deletion ({total_count} items)",
-                items=preview_items,
-                warning_message="⚠️ この操作は取り消すことができません。" if is_japanese else "⚠️ This operation cannot be undone.",
-                timeout=self.valves.confirmation_timeout,
-                __user__=__user__,
-                __event_call__=__event_call__,
-            )
-            
-            if not confirmed:
-                return error_msg
-            
-            # Show compact result message (list only first 10)
-            result_list = fact_list[:10]
-            result = f"🔍 Found {total_count} facts:\n" + "\n".join(result_list)
-            if total_count > 10:
-                result += f"\n... and {total_count - 10} more"
-            
-            # Delete edges using Cypher
-            edge_uuids = [edge.uuid for edge in edges]
-            deleted_count = await self.helper.delete_edges_by_uuids(edge_uuids)
-            
-            result += f"\n\n✅ Deleted {deleted_count} facts"
-            return result
-            
-        except Exception as e:
-            error_msg = f"❌ Error searching/deleting facts: {str(e)}"
-            if self.valves.debug_print:
-                traceback.print_exc()
-            return error_msg
-    
-    async def search_and_delete_episodes(
-        self,
-        query: str,
-        limit: int = 1,
-        group_suffix: Optional[str] = None,
-        __user__: dict = {},
-        __event_emitter__: Optional[Callable[[dict], Any]] = None,
-        __event_call__: Optional[Callable[[dict], Any]] = None,
-    ) -> str:
-        """
-        Search for episodes (conversation history) and delete them after user confirmation.
-        
-        This tool searches for past conversations and allows you to delete them
-        along with the entities and relationships extracted from them.
-        
-        IMPORTANT: This operation requires user confirmation and cannot be undone.
-        
-        :param query: Search query to find episodes (e.g., "conversation about Python")
-        :param limit: Maximum number of episodes to return (default: 1, max: 100)
-        :param group_suffix: Optional group_id suffix. None uses default_group_suffix. "" uses no suffix.
-        :return: Result message with deleted episodes count
-        """
-        if not await self.helper.ensure_graphiti_initialized() or self.helper.graphiti is None:
-            return "❌ Error: Memory service is not available"
-        
-        
-        # Set user headers in context variable (before any API calls)
-        headers = get_user_info_headers(self.valves, __user__, None)
-        user_headers_context.set(headers)
-        if self.valves.debug_print and headers:
-            print(f"Set user headers in context: {list(headers.keys())}")
-        # Validate and clamp limit
-        try:
-            limit = max(1, min(100, int(limit)))
-        except (TypeError, ValueError):
-            return "❌ Error: limit must be an integer"
-        
-        try:
-            group_id, error_msg = self.helper.get_group_id_with_suffix(__user__, group_suffix)
-            if error_msg:
-                return error_msg
-            
-            # Create a copy of config with custom limit
-            search_config = copy.copy(COMBINED_HYBRID_SEARCH_RRF)
-            search_config.limit = limit
-            
-            # Search for episodes using search_() which returns SearchResults
-            search_results = await self.helper.graphiti.search_(
-                query=query,
-                group_ids=[group_id] if group_id else None,
-                config=search_config,
-            )
-            
-            # Extract episodes
-            episodes = search_results.episodes
-            
-            if not episodes:
-                return f"ℹ️ No episodes found matching '{query}'"
-            
-            # Show all episodes for confirmation (no limit - user must see everything being deleted)
-            total_count = len(episodes)
-            
-            # Get user's language preference
-            is_japanese = self.helper.is_japanese_preferred(__user__)
-            
-            episode_list = []
-            preview_items = []
-            created_label = "作成日時" if is_japanese else "Created"
-            for i, episode in enumerate(episodes, 1):
-                name = getattr(episode, 'name', 'Unknown episode')
-                content = getattr(episode, 'content', '')
-                if len(content) > 80:
-                    content_preview = content[:80] + "..."
-                else:
-                    content_preview = content
-                created_at = getattr(episode, 'created_at', 'unknown')
-                episode_list.append(f"{i}. {name}: {content_preview} (created: {created_at})")
-                preview_items.append(f"[{i}] {name}  \n{content_preview}  \n{created_label}: {created_at}")
-            
-            # Show confirmation dialog
-            confirmed, error_msg = await self.helper.show_confirmation_dialog(
-                title=f"エピソードの削除確認 ({total_count}件)" if is_japanese else f"Confirm Episode Deletion ({total_count} items)",
-                items=preview_items,
-                warning_message="⚠️ この操作は取り消すことができません。関連するエンティティと関係性も削除されます。" if is_japanese else "⚠️ This operation cannot be undone. Related entities and relationships will also be deleted.",
-                timeout=self.valves.confirmation_timeout,
-                __user__=__user__,
-                __event_call__=__event_call__,
-            )
-            
-            if not confirmed:
-                return error_msg
-            
-            # Show compact result message (list only first 10)
-            result_list = episode_list[:10]
-            result = f"🔍 Found {total_count} episodes:\n" + "\n".join(result_list)
-            if total_count > 10:
-                result += f"\n... and {total_count - 10} more"
-            
-            # Delete episodes using remove_episode
-            episode_uuids = [episode.uuid for episode in episodes]
-            deleted_count = await self.helper.delete_episodes_by_uuids(episode_uuids)
-            
-            result += f"\n\n✅ Deleted {deleted_count} episodes"
-            return result
-            
-        except Exception as e:
-            error_msg = f"❌ Error searching/deleting episodes: {str(e)}"
-            if self.valves.debug_print:
-                traceback.print_exc()
-            return error_msg
-    
     async def delete_by_uuids(
         self,
         node_uuids: str = "",

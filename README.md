@@ -65,7 +65,7 @@ AI-callable tools for memory management.
 - **Migration**: Migrate Open WebUI's built-in memories to Graphiti knowledge graph
 - **Precise Search**: Search for specific Entities, Facts (relationships), or Episodes separately
 - **Confirmation Dialogs**: Well-designed confirmation dialogs before deletion operations
-- **Safe Deletion**: Search and delete specific memories with preview
+- **Safe Deletion**: Targeted deletion via `delete_by_uuids` (look up UUIDs with search tools first) to avoid accidental mass removal; bulk options (`delete_episodes_by_time_range`, `clear_all_memory`) still require explicit confirmation
 - **Batch Operations**: Manage multiple memory items at once
 - **UUID-based Operations**: Direct manipulation via UUIDs when needed
 
