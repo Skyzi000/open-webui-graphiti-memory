@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.7.0
+version: 0.7.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -45,6 +45,12 @@ from openai import AsyncOpenAI
 user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
     'user_headers', default=None
 )
+
+
+async def maybe_await(value):
+    if hasattr(value, "__await__"):
+        return await value
+    return value
 
 
 def _normalize_group_suffix(value: Optional[str]) -> str:
@@ -1141,7 +1147,7 @@ class Tools:
 
         # Fetch all built-in memories for user
         try:
-            builtin_memories = Memories.get_memories_by_user_id(user_id)
+            builtin_memories = await maybe_await(Memories.get_memories_by_user_id(user_id))
             if not builtin_memories:
                 return "ℹ️ No built-in memories found for this user."
 

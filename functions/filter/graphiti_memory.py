@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.22.0
+version: 0.22.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -113,6 +113,12 @@ user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = context
 )
 
 
+async def maybe_await(value):
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
 class MultiUserOpenAIClient(OpenAIClient):
     """
     Custom OpenAI LLM client that retrieves user-specific headers from context variables.
@@ -214,7 +220,7 @@ class MultiUserOpenAIEmbedder(OpenAIEmbedder):
         self._base_client = value
 
 
-def get_model_display_name(model_id: str) -> Optional[str]:
+async def get_model_display_name(model_id: str) -> Optional[str]:
     """
     Get human-readable model name from model ID.
 
@@ -229,7 +235,7 @@ def get_model_display_name(model_id: str) -> Optional[str]:
         return None
 
     try:
-        model = Models.get_model_by_id(model_id)
+        model = await maybe_await(Models.get_model_by_id(model_id))
         if model and model.name:
             return model.name
     except Exception:
@@ -238,7 +244,7 @@ def get_model_display_name(model_id: str) -> Optional[str]:
     return None
 
 
-def get_filter_display_name(filter_id: str) -> Optional[str]:
+async def get_filter_display_name(filter_id: str) -> Optional[str]:
     """
     Get the display name of a filter from its ID.
 
@@ -253,7 +259,7 @@ def get_filter_display_name(filter_id: str) -> Optional[str]:
         return None
 
     try:
-        function = Functions.get_function_by_id(filter_id)
+        function = await maybe_await(Functions.get_function_by_id(filter_id))
         if function and function.name:
             return function.name
     except Exception:
@@ -1854,7 +1860,7 @@ class Filter:
             str(message_id),
         )
 
-    def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
+    async def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
         """
         Resolve chat title from Open WebUI Chats model.
         Falls back to None on errors or when chat_id is missing/unknown.
@@ -1867,7 +1873,7 @@ class Filter:
             return None
 
         try:
-            return Chats.get_chat_title_by_id(str(chat_id))
+            return await maybe_await(Chats.get_chat_title_by_id(str(chat_id)))
         except Exception:
             return None
 
@@ -2008,7 +2014,7 @@ class Filter:
         """
         if not self.valves.wait_for_chat_title:
             # Feature disabled, return current title immediately
-            return self._get_chat_title(chat_id)
+            return await self._get_chat_title(chat_id)
 
         if not chat_id or chat_id == "unknown":
             return None
@@ -2022,7 +2028,7 @@ class Filter:
         is_ja = self._is_japanese_preferred(user_valves) if user_valves else False
 
         # Check initial title
-        title = self._get_chat_title(chat_id)
+        title = await self._get_chat_title(chat_id)
         if not self._is_default_chat_title(title):
             # Already has a custom title, no need to wait
             return title
@@ -2042,7 +2048,7 @@ class Filter:
             showed_waiting_status = True
 
         while True:
-            title = self._get_chat_title(chat_id)
+            title = await self._get_chat_title(chat_id)
 
             if not self._is_default_chat_title(title):
                 # Got a custom title
@@ -4002,7 +4008,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Cache filter metadata for citation source auto-generation (once per instance)
         if __id__ and self._cached_filter_id is None:
             self._cached_filter_id = __id__
-            self._cached_filter_name = get_filter_display_name(__id__)
+            self._cached_filter_name = await get_filter_display_name(__id__)
             if self.valves.debug_print:
                 print(f"Cached filter metadata: id={self._cached_filter_id}, name={self._cached_filter_name}")
 
@@ -4440,7 +4446,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Cache filter metadata for citation source auto-generation (once per instance)
         if __id__ and self._cached_filter_id is None:
             self._cached_filter_id = __id__
-            self._cached_filter_name = get_filter_display_name(__id__)
+            self._cached_filter_name = await get_filter_display_name(__id__)
             if self.valves.debug_print:
                 print(f"Cached filter metadata: id={self._cached_filter_id}, name={self._cached_filter_name}")
 
@@ -4597,7 +4603,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
             msg_id = previous_assistant_message.get("id")
             if msg_id and chat_id and chat_id != "unknown":
                 try:
-                    db_message = Chats.get_message_by_id_and_message_id(chat_id, msg_id)
+                    db_message = await maybe_await(Chats.get_message_by_id_and_message_id(chat_id, msg_id))
                     if db_message and "model" in db_message:
                         # Merge database fields (especially 'model') into the message
                         previous_assistant_message = {**previous_assistant_message, "model": db_message["model"]}
@@ -4701,7 +4707,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                         model_id = body.get("model")
 
                     # Convert model ID to human-readable name
-                    model_name = get_model_display_name(model_id) if model_id else None
+                    model_name = await get_model_display_name(model_id) if model_id else None
 
                     # Debug output
                     if self.valves.debug_print:

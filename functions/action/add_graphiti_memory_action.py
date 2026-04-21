@@ -4,7 +4,7 @@ description: Action button to save clicked messages to Graphiti knowledge graph 
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.4
+version: 0.3.5
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cmVjdCB4PSI2IiB5PSI0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjQiIHJ4PSIyLjUiIGZpbGw9IiNmNmY2ZjAiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIxMCIgeT0iOCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjYiIHJ4PSIxIiBmaWxsPSIjZDBlNmZmIiBzdHJva2U9IiM0YzRjNGMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxyZWN0IHg9IjEyIiB5PSIyMCIgd2lkdGg9IjgiIGhlaWdodD0iNiIgcng9IjAuNyIgZmlsbD0iI2ZmZmJlNiIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cmVjdCB4PSIxMyIgeT0iMjEiIHdpZHRoPSI2IiBoZWlnaHQ9IjIuNSIgcng9IjAuNyIgZmlsbD0iIzRjNGM0YyIvPgo8L3N2Zz4=
 
@@ -64,6 +64,12 @@ except Exception:
 user_headers_context: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
     'user_headers', default=None
 )
+
+
+async def maybe_await(value):
+    if hasattr(value, "__await__"):
+        return await value
+    return value
 
 
 class MultiUserOpenAIClient(OpenAIClient):
@@ -530,14 +536,14 @@ class Action:
 
         return content if isinstance(content, str) else ""
 
-    def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
+    async def _get_chat_title(self, chat_id: Optional[str]) -> Optional[str]:
         """Resolve chat title from Open WebUI Chats model."""
         if Chats is None:
             return None
         if not chat_id or chat_id == "unknown":
             return None
         try:
-            return Chats.get_chat_title_by_id(str(chat_id))
+            return await maybe_await(Chats.get_chat_title_by_id(str(chat_id)))
         except Exception:
             return None
 
@@ -688,7 +694,7 @@ class Action:
 
                 # Build episode name and source_description (matching Filter format)
                 user_turn_index = sum(1 for m in messages if m.get("role") == "user")
-                chat_title = self._get_chat_title(chat_id) or "Manual_Save"
+                chat_title = await self._get_chat_title(chat_id) or "Manual_Save"
                 episode_name = (
                     f"{chat_title}_turn{user_turn_index}"
                     if user_turn_index > 0
