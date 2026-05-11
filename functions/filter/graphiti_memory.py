@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.22.1
+version: 0.22.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -105,6 +105,11 @@ try:
 except Exception:  # pragma: no cover - fallback for non-core environments
     Functions = None
 
+try:
+    from open_webui.models.channels import Channels  # type: ignore
+except Exception:  # pragma: no cover - fallback for non-core environments
+    Channels = None
+
 # Context variable to store user-specific headers for each async request
 # This ensures complete isolation between concurrent requests without locks
 # Default is None, callers should always call .set() before use
@@ -117,6 +122,43 @@ async def maybe_await(value):
     if hasattr(value, "__await__"):
         return await value
     return value
+
+
+def _is_regular_chat_id(chat_id: Optional[Any]) -> bool:
+    """Return True for chat IDs backed by Open WebUI's Chats table."""
+    if not chat_id:
+        return False
+    return not str(chat_id).startswith(("local:", "channel:"))
+
+
+async def _get_channel_title(chat_id: Optional[Any]) -> Optional[str]:
+    """Return the channel name for a 'channel:{id}' chat_id, or None.
+
+    Channel chats aren't backed by the Chats table, so the chat-title
+    path can't reach them — Channels.get_channel_by_id resolves the
+    channel's `name` field for use as the episode label instead of a
+    raw "Channel {id}" fallback.
+    """
+    if Channels is None or not isinstance(chat_id, str):
+        return None
+    if not chat_id.startswith("channel:"):
+        return None
+    channel_id = chat_id.removeprefix("channel:")
+    if not channel_id:
+        return None
+    try:
+        channel = await maybe_await(Channels.get_channel_by_id(channel_id))
+    except Exception:
+        return None
+    name = getattr(channel, "name", None) if channel else None
+    return name or None
+
+
+def _fallback_episode_title(chat_id: Optional[Any]) -> str:
+    if isinstance(chat_id, str) and chat_id.startswith("channel:"):
+        channel_id = chat_id.removeprefix("channel:") or "unknown"
+        return f"Channel {channel_id}"
+    return "New Chat"
 
 
 class MultiUserOpenAIClient(OpenAIClient):
@@ -1869,7 +1911,7 @@ class Filter:
         if Chats is None:
             return None
 
-        if not chat_id or chat_id == "unknown":
+        if not _is_regular_chat_id(chat_id) or chat_id == "unknown":
             return None
 
         try:
@@ -2016,7 +2058,7 @@ class Filter:
             # Feature disabled, return current title immediately
             return await self._get_chat_title(chat_id)
 
-        if not chat_id or chat_id == "unknown":
+        if not _is_regular_chat_id(chat_id) or chat_id == "unknown":
             return None
 
         timeout = self.valves.wait_for_chat_title_timeout
@@ -4601,7 +4643,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # Enrich previous_assistant_message with model field from database if available
         if previous_assistant_message and Chats is not None:
             msg_id = previous_assistant_message.get("id")
-            if msg_id and chat_id and chat_id != "unknown":
+            if msg_id and _is_regular_chat_id(chat_id) and chat_id != "unknown":
                 try:
                     db_message = await maybe_await(Chats.get_message_by_id_and_message_id(chat_id, msg_id))
                     if db_message and "model" in db_message:
@@ -4825,7 +4867,11 @@ window.addEventListener('resize', renderGraph, { passive: true });
             user_turn_index = sum(1 for m in messages if m.get("role") == "user")
 
             # Resolve chat title for episode name (optionally wait for auto-generation)
-            chat_title = await self._wait_for_chat_title(chat_id, __event_emitter__, user_valves) or "New Chat"
+            chat_title = (
+                await self._wait_for_chat_title(chat_id, __event_emitter__, user_valves)
+                or await _get_channel_title(chat_id)
+                or _fallback_episode_title(chat_id)
+            )
             episode_name = (
                 f"{chat_title}_turn{user_turn_index}"
                 if user_turn_index > 0
