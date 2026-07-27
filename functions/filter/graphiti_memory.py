@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.22.2
+version: 0.22.3
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -124,11 +124,19 @@ async def maybe_await(value):
     return value
 
 
+_TEMPORARY_CHAT_PREFIXES = ("local:", "temporary:")
+
+
+def _is_temporary_chat_id(chat_id: Optional[Any]) -> bool:
+    """Return True for temporary chat IDs that aren't persisted by Open WebUI."""
+    return bool(chat_id) and str(chat_id).startswith(_TEMPORARY_CHAT_PREFIXES)
+
+
 def _is_regular_chat_id(chat_id: Optional[Any]) -> bool:
     """Return True for chat IDs backed by Open WebUI's Chats table."""
     if not chat_id:
         return False
-    return not str(chat_id).startswith(("local:", "channel:"))
+    return not _is_temporary_chat_id(chat_id) and not str(chat_id).startswith("channel:")
 
 
 async def _get_channel_title(chat_id: Optional[Any]) -> Optional[str]:
@@ -691,11 +699,11 @@ class Filter:
         )
         auto_disable_search_on_temporary_chat: bool = Field(
             default=True,
-            description="Automatically disable memory search (inlet) for temporary chats. Temporary chats are identified by chat_id starting with 'local:'.",
+            description="Automatically disable memory search (inlet) for temporary chats. Temporary chats are identified by chat_id starting with 'local:' or 'temporary:'.",
         )
         auto_disable_save_on_temporary_chat: bool = Field(
             default=True,
-            description="Automatically disable memory storage (outlet) for temporary chats. Temporary chats are identified by chat_id starting with 'local:'.",
+            description="Automatically disable memory storage (outlet) for temporary chats. Temporary chats are identified by chat_id starting with 'local:' or 'temporary:'.",
         )
 
     def __init__(self):
@@ -4092,9 +4100,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 print("Both inject_facts and inject_entities are disabled. Skipping memory search.")
             return body
 
-        # Check if this is a temporary chat (chat_id starts with 'local:')
+        # Check if this is a temporary chat
         chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
-        if user_valves.auto_disable_search_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
+        if user_valves.auto_disable_search_on_temporary_chat and _is_temporary_chat_id(chat_id_for_temp_check):
             if self.valves.debug_print:
                 print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory search.")
             return body
@@ -4511,9 +4519,9 @@ window.addEventListener('resize', renderGraph, { passive: true });
                     print("Graphiti Memory feature is disabled for this user.")
                 return body
 
-        # Check if this is a temporary chat (chat_id starts with 'local:')
+        # Check if this is a temporary chat
         chat_id_for_temp_check = str((__metadata__ or {}).get('chat_id') or '')
-        if user_valves.auto_disable_save_on_temporary_chat and chat_id_for_temp_check.startswith('local:'):
+        if user_valves.auto_disable_save_on_temporary_chat and _is_temporary_chat_id(chat_id_for_temp_check):
             if self.valves.debug_print:
                 print(f"Temporary chat detected (chat_id={chat_id_for_temp_check}). Skipping memory storage.")
             return body
