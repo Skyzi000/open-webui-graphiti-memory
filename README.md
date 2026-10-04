@@ -239,7 +239,7 @@ For distributed deployments with multiple Open WebUI instances:
 - `semaphore_limit`: Maximum concurrent LLM operations (default: 10). Adjust based on your LLM provider's rate limits
 - `add_episode_timeout`: Timeout in seconds for adding episodes (default: 240)
 - `max_search_message_length`: Maximum length of user message for Graphiti search (default: 5000)
-- `memory_message_role`: Role for injected memory messages (`'system'` or `'user'`)
+- `memory_message_role`: Role and position for injected memory messages. `'user'` (default) appends them to the text of the latest user message, and skips the search when that message is a `/skills:create` command; `'system'` inserts them just before the latest user message as a system message; `'system_after'` inserts that system message right after the latest user message instead. Open WebUI 0.8.11+ merges all system messages into one at the start of the conversation
 - `enable_entity_delete_button`: Show delete button in entity citation cards (experimental)
 
 ### User Valves
@@ -279,7 +279,7 @@ Users can customize their experience:
 
 ## Optional: Pipeline Hosting
 
-`pipelines/graphiti_memory_pipeline.py` packages the exact same filter logic so it can run under the Pipelines service. Open WebUI treats it as a "filter"-type pipeline, and its `inlet`/`outlet` behavior is identical to the in-app filter.  
+`pipelines/graphiti_memory_pipeline.py` is an older copy of the filter logic that can run under the Pipelines service as a "filter"-type pipeline. It does not have the Filter's later changes; for example, it still injects memories as a system message by default and has no `system_after` option.  
 To use this pipeline version, enter the following GitHub Raw URL in **Admin Settings → Pipelines**.
 
 ```text

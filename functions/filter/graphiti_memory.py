@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.22.3
+version: 0.23.0
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -122,6 +122,46 @@ async def maybe_await(value):
     if hasattr(value, "__await__"):
         return await value
     return value
+
+
+# Same match as Open WebUI's /skills:create command, which replaces the whole user message
+SKILLS_CREATE_RE = re.compile(r"/skills:create(?:\s|$)", re.IGNORECASE)
+
+
+def is_skills_create_command(message: dict) -> bool:
+    content = message.get("content")
+    if isinstance(content, list):
+        content = next(
+            (part.get("text") for part in content if isinstance(part, dict) and part.get("type") == "text"),
+            None,
+        )
+    return isinstance(content, str) and bool(SKILLS_CREATE_RE.match(content.strip()))
+
+
+def with_appended_text(message: dict, addition: str) -> dict:
+    """Copy of the message with addition appended to its first text part, the one Open WebUI reads as the prompt."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return {**message, "content": f"{content}\n\n{addition}" if content else addition}
+    index = next(
+        (i for i, part in enumerate(content) if isinstance(part, dict) and part.get("type") == "text"),
+        None,
+    )
+    if index is None:
+        return {**message, "content": [*content, {"type": "text", "text": addition}]}
+    text = content[index].get("text")
+    part = {**content[index], "text": f"{text}\n\n{addition}" if text else addition}
+    return {**message, "content": [*content[:index], part, *content[index + 1 :]]}
+
+
+def without_appended(text: str, before: str, appended: str) -> str:
+    """Undo inlet's append of appended to before: the last appended in text, then every copy of the two together.
+
+    Open WebUI can rewrite the prompt in front of appended (skill mentions) and can repeat the whole prompt inside the
+    message (a RAG template with a query placeholder).
+    """
+    head, _, tail = text.rpartition(appended)
+    return (head + tail).replace(before + appended, before)
 
 
 _TEMPORARY_CHAT_PREFIXES = ("local:", "temporary:")
@@ -501,8 +541,8 @@ class Filter:
         )
         
         memory_message_role: str = Field(
-            default="system",
-            description="Role to use when injecting memory search results into the conversation. Options: 'system' (system message, more authoritative), 'user' (user message, more conversational). Default is 'system'.",
+            default="user",
+            description="Role and position of the injected memory message: 'user' (default), 'system' or 'system_after'. 'user' appends it to the text of the latest user message; nothing is searched or injected when that message is a /skills:create command. 'system' inserts it as a system message just before the latest user message. 'system_after' inserts that system message right after the latest user message instead; standard Open WebUI then adds RAG context as a separate user message instead of adding it to the user's message, unless RAG_SYSTEM_CONTEXT is enabled. Open WebUI 0.8.11+ merges all system messages into one at the start of the conversation.",
         )
         
         forward_user_info_headers: str = Field(
@@ -4054,7 +4094,25 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __metadata__: Optional[dict] = None,
         __id__: Optional[str] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        __request__: Optional[Any] = None,
     ) -> dict:
+        # Open WebUI hands outlet the inlet-modified messages for chats it does not store (API calls, channels), so
+        # outlet takes the appended memory back out. Tools rerun inlet on the same request for their own model calls;
+        # only a filter's first call for a message is the one whose result outlet gets. Open WebUI puts the resolved
+        # tools in the metadata after its own inlet calls and before any tool runs, so a call that has them is a tool's.
+        appended_memory = None
+        message_id = (__metadata__ or {}).get("message_id")
+        if (
+            __request__ is not None
+            and not _is_regular_chat_id((__metadata__ or {}).get("chat_id"))
+            and "tools" not in (__metadata__ or {})
+        ):
+            if not hasattr(__request__.state, "graphiti_appended_memory"):
+                __request__.state.graphiti_appended_memory = {}
+            if (message_id, __id__) not in __request__.state.graphiti_appended_memory:
+                appended_memory = __request__.state.graphiti_appended_memory
+                appended_memory[message_id, __id__] = ("", "")
+
         # Cache filter metadata for citation source auto-generation (once per instance)
         if __id__ and self._cached_filter_id is None:
             self._cached_filter_id = __id__
@@ -4139,6 +4197,32 @@ window.addEventListener('resize', renderGraph, { passive: true });
         if messages and messages[-1].get("role") == "assistant":
             if self.valves.debug_print:
                 print("Detected 'Continue Response' action (last message is assistant). Skipping memory search.")
+            return body
+
+        # Find the index of the last user message
+        last_user_msg_index = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_msg_index = i
+                break
+
+        # Determine the role to use for memory message (default to user if invalid value)
+        memory_role = self.valves.memory_message_role.lower()
+        if memory_role not in ["system", "system_after", "user"]:
+            if self.valves.debug_print:
+                print(f"Invalid memory_message_role '{memory_role}', using 'user'")
+            memory_role = "user"
+        memory_after_user = memory_role == "system_after"
+        if memory_after_user:
+            memory_role = "system"
+
+        if (
+            memory_role == "user"
+            and last_user_msg_index is not None
+            and is_skills_create_command(messages[last_user_msg_index])
+        ):
+            if self.valves.debug_print:
+                print("Latest user message is a /skills:create command. Skipping memory search.")
             return body
         
         max_length = self.valves.max_search_message_length
@@ -4381,20 +4465,6 @@ window.addEventListener('resize', renderGraph, { passive: true });
 
         # Insert memory message if we have facts OR entities
         if len(facts) > 0 or len(entities) > 0:
-            # Find the index of the last user message
-            last_user_msg_index = None
-            for i in range(len(body['messages']) - 1, -1, -1):
-                if body['messages'][i].get("role") == "user":
-                    last_user_msg_index = i
-                    break
-            
-            # Determine the role to use for memory message (default to system if invalid value)
-            memory_role = self.valves.memory_message_role.lower()
-            if memory_role not in ["system", "user"]:
-                if self.valves.debug_print:
-                    print(f"Invalid memory_message_role '{memory_role}', using 'system'")
-                memory_role = "system"
-            
             # Format memory content with improved structure
             # Priority: explicit Valves setting > cached filter name > filter ID > fallback
             source_name = (
@@ -4445,17 +4515,26 @@ window.addEventListener('resize', renderGraph, { passive: true });
             
             memory_content += f"\n</{source_name}>"
             
-            # Insert memory before the last user message
             memory_message = {
                 "role": memory_role,
                 "content": memory_content
             }
-            
-            if last_user_msg_index is not None:
-                body['messages'].insert(last_user_msg_index, memory_message)
-            else:
+
+            if last_user_msg_index is None:
                 # Fallback: if no user message found, append to end
                 body['messages'].append(memory_message)
+            elif memory_role == "user":
+                text_before = self._get_content_from_message(body['messages'][last_user_msg_index]) or ""
+                body['messages'][last_user_msg_index] = with_appended_text(
+                    body['messages'][last_user_msg_index], memory_content
+                )
+                if appended_memory is not None:
+                    text_after = self._get_content_from_message(body['messages'][last_user_msg_index])
+                    appended_memory[message_id, __id__] = (text_before, text_after[len(text_before):])
+            elif memory_after_user:
+                body['messages'].insert(last_user_msg_index + 1, memory_message)
+            else:
+                body['messages'].insert(last_user_msg_index, memory_message)
             
             if user_valves.show_status:
                 is_ja = self._is_japanese_preferred(user_valves)
@@ -4492,6 +4571,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
         __id__: Optional[str] = None,
+        __request__: Optional[Any] = None,
     ) -> dict:
         # Cache filter metadata for citation source auto-generation (once per instance)
         if __id__ and self._cached_filter_id is None:
@@ -4553,6 +4633,17 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # correct chronological timestamp.
         reference_time = datetime.now(timezone.utc)
 
+        # What every copy of this filter appended to the message being saved, latest first
+        appended_memory = []
+        # Open WebUI 0.8.9+ keeps the prompt it hands to the RAG template, with skill mentions already rewritten
+        prompt = (__metadata__ or {}).get("user_prompt")
+        records = getattr(getattr(__request__, "state", None), "graphiti_appended_memory", {})
+        for (record_message_id, _), (text_before, appended) in reversed(records.items()):
+            if appended and record_message_id == (__metadata__ or {}).get("message_id"):
+                if isinstance(prompt, str) and appended in prompt:
+                    text_before = prompt = prompt.rpartition(appended)[0]
+                appended_memory.append((text_before, appended))
+
         self._launch_background_task(
             self._save_memory_background(
                 body=body_snapshot,
@@ -4562,6 +4653,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 user_valves=user_valves,
                 filter_id_for_prefix=filter_id_for_prefix,
                 reference_time=reference_time,
+                appended_memory=tuple(appended_memory),
             )
         )
         return body
@@ -4575,6 +4667,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         user_valves: "Filter.UserValves",
         filter_id_for_prefix: str,
         reference_time: datetime,
+        appended_memory: tuple[tuple[str, str], ...] = (),
     ) -> None:
         try:
             await self._save_memory_background_inner(
@@ -4585,6 +4678,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 user_valves=user_valves,
                 filter_id_for_prefix=filter_id_for_prefix,
                 reference_time=reference_time,
+                appended_memory=appended_memory,
             )
         except Exception:
             traceback.print_exc()
@@ -4610,6 +4704,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         user_valves: "Filter.UserValves",
         filter_id_for_prefix: str,
         reference_time: datetime,
+        appended_memory: tuple[tuple[str, str], ...] = (),
     ) -> None:
         # Initialize graphiti in background to avoid blocking outlet()
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
@@ -4670,6 +4765,24 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # This ensures that both the user's command and the assistant's response are not saved
         # (e.g., deletion requests and their confirmations)
         latest_user_content = self._get_content_from_message(last_user_message) if last_user_message else None
+        for text_before, appended in appended_memory:
+            # Open WebUI rewrites skill mentions inside the appended memory too; it then reads as the user's own text
+            if appended not in (latest_user_content or ""):
+                if self.valves.debug_print:
+                    print("Skipping entire turn because the memory inlet appended is no longer in the user message.")
+                if user_valves.show_status:
+                    if self._is_japanese_preferred(user_valves):
+                        skip_msg = "⏭️ このターンの保存をスキップしました (追記した記憶をメッセージから取り除けませんでした)"
+                    else:
+                        skip_msg = "⏭️ Skipped saving this turn (could not remove the appended memory from the message)"
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {"description": skip_msg, "done": True},
+                        }
+                    )
+                return
+            latest_user_content = without_appended(latest_user_content, text_before, appended)
         if self._should_skip_save(latest_user_content, skip_pattern):
             if self.valves.debug_print:
                 print("Skipping entire turn due to skip_save_regex match on user message.")
@@ -4702,7 +4815,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
 
         user_content_block = ""
         if user_valves.save_user_message and last_user_message:
-            user_content_block = self._get_content_from_message(last_user_message) or ""
+            user_content_block = latest_user_content or ""
             if user_valves.merge_retrieved_context:
                 allowed_types_set = self._parse_allowed_source_types(
                     getattr(user_valves, "allowed_rag_source_types", None)
