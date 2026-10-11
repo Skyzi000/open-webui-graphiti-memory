@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.23.0
+version: 0.23.1
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -4636,7 +4636,8 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # What every copy of this filter appended to the message being saved, latest first
         appended_memory = []
         # Open WebUI 0.8.9+ keeps the prompt it hands to the RAG template, with skill mentions already rewritten
-        prompt = (__metadata__ or {}).get("user_prompt")
+        # (as "user_prompt" before 0.12.0)
+        prompt = (__metadata__ or {}).get("base_user_prompt") or (__metadata__ or {}).get("user_prompt")
         records = getattr(getattr(__request__, "state", None), "graphiti_appended_memory", {})
         for (record_message_id, _), (text_before, appended) in reversed(records.items()):
             if appended and record_message_id == (__metadata__ or {}).get("message_id"):
