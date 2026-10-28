@@ -4,7 +4,7 @@ description: Action button to delete an episode from Graphiti knowledge graph me
 author: Skyzi000
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.3.0
+version: 0.3.1
 requirements: graphiti-core
 icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj4KICA8cGF0aCBkPSJNOCA5aDN2MTZIOHptNiAwaDN2MTZoLTN6bTYgMGgzdjE2aC0zeiIgZmlsbD0iIzRjNGM0YyIvPgogIDxyZWN0IHg9IjYiIHk9IjYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIzIiByeD0iMSIgZmlsbD0iIzRjNGM0YyIvPgogIDxwYXRoIGQ9Ik0xMSA2VjRhMiAyIDAgMCAxIDItMmg2YTIgMiAwIDAgMSAyIDJ2MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGM0YzRjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwYXRoIGQ9Ik03IDloMTh2MThhMiAyIDAgMCAxLTIgMkg5YTIgMiAwIDAgMS0yLTJWOXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjNGM0YyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KPC9zdmc+
 
@@ -675,11 +675,19 @@ This operation cannot be undone."""
 
                 result = await asyncio.wait_for(confirmation_task, timeout=user_valves.confirmation_timeout)
 
-                if not result:
+                # Open WebUI replies to a disconnected or timed-out dialog with an error object.
+                if result is not True:
                     if self.valves.debug_print:
-                        print("User cancelled deletion")
+                        print(f"Deletion not confirmed: {result!r}")
                     if __event_emitter__ and user_valves.show_status:
-                        msg = "🚫 削除がキャンセルされました" if is_ja else "🚫 Deletion cancelled"
+                        if isinstance(result, dict) and result.get("error"):
+                            msg = (
+                                f"❌ 削除を確認できませんでした: {result['error']}"
+                                if is_ja
+                                else f"❌ Could not confirm deletion: {result['error']}"
+                            )
+                        else:
+                            msg = "🚫 削除がキャンセルされました" if is_ja else "🚫 Deletion cancelled"
                         await __event_emitter__(
                             {
                                 "type": "status",

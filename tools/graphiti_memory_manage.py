@@ -4,7 +4,7 @@ author: Skyzi000
 description: Manage specific entities, relationships, or episodes in Graphiti knowledge graph memory.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.7.1
+version: 0.7.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -665,10 +665,12 @@ class GraphitiHelper:
             
             try:
                 result = await asyncio.wait_for(confirmation_task, timeout=timeout)
-                if result:
+                # Open WebUI replies to a disconnected or timed-out dialog with an error object.
+                if result is True:
                     return True, ""
-                else:
-                    return False, "🚫 User cancelled the operation"
+                if isinstance(result, dict) and result.get("error"):
+                    return False, f"❌ Error: Confirmation failed: {result['error']}"
+                return False, "🚫 User cancelled the operation"
             except asyncio.TimeoutError:
                 return False, "⏰ Operation timed out - user did not respond within the time limit"
         except Exception:
