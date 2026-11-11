@@ -4,7 +4,7 @@ author: Skyzi000
 description: Temporal knowledge graph-based memory system using Graphiti. Automatically extracts entities, facts, and their relationships from conversations, stores them with timestamps in a graph database, and retrieves relevant context for future conversations.
 author_url: https://github.com/Skyzi000
 repository_url: https://github.com/Skyzi000/open-webui-graphiti-memory
-version: 0.23.1
+version: 0.23.2
 requirements: graphiti-core
 
 Note on FalkorDB backend:
@@ -162,6 +162,28 @@ def without_appended(text: str, before: str, appended: str) -> str:
     """
     head, _, tail = text.rpartition(appended)
     return (head + tail).replace(before + appended, before)
+
+
+def without_core_memory_context(text: str, inlet_text: str, prompt: Optional[str]) -> str:
+    """Undo the memory Open WebUI 0.13.1+ appends to the prompt after the inlet, also where a RAG template repeats it.
+
+    prompt is the prompt Open WebUI recorded with the memory. The memory itself can hold the tags, so its block opens
+    at the tag that has as many tags before it as inlet_text, the text the inlets returned, and closes at the last
+    tag: Open WebUI appends its code interpreter prompt after the block.
+    """
+    opening, closing = "\n<memory_context>\n", "\n</memory_context>"
+    if not isinstance(prompt, str):
+        return text
+    count = inlet_text.count(opening)
+    starts = [
+        match.start()
+        for match in re.finditer(f"(?={re.escape(opening)})", prompt)
+        if prompt.count(opening, 0, match.start()) == count
+    ]
+    end = prompt.rfind(closing) + len(closing)
+    if not starts or end <= starts[-1] + len(closing):
+        return text
+    return without_appended(text, prompt[: starts[-1]], prompt[starts[-1] : end])
 
 
 _TEMPORARY_CHAT_PREFIXES = ("local:", "temporary:")
@@ -4112,6 +4134,11 @@ window.addEventListener('resize', renderGraph, { passive: true });
             if (message_id, __id__) not in __request__.state.graphiti_appended_memory:
                 appended_memory = __request__.state.graphiti_appended_memory
                 appended_memory[message_id, __id__] = ("", "")
+                user_messages = [m for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"]
+                if not hasattr(__request__.state, "graphiti_inlet_user_text"):
+                    __request__.state.graphiti_inlet_user_text = {}
+                inlet_user_text = self._get_content_from_message(user_messages[-1]) if user_messages else ""
+                __request__.state.graphiti_inlet_user_text[message_id, __id__] = inlet_user_text or ""
 
         # Cache filter metadata for citation source auto-generation (once per instance)
         if __id__ and self._cached_filter_id is None:
@@ -4531,6 +4558,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 if appended_memory is not None:
                     text_after = self._get_content_from_message(body['messages'][last_user_msg_index])
                     appended_memory[message_id, __id__] = (text_before, text_after[len(text_before):])
+                    __request__.state.graphiti_inlet_user_text[message_id, __id__] = text_after
             elif memory_after_user:
                 body['messages'].insert(last_user_msg_index + 1, memory_message)
             else:
@@ -4645,6 +4673,13 @@ window.addEventListener('resize', renderGraph, { passive: true });
                     text_before = prompt = prompt.rpartition(appended)[0]
                 appended_memory.append((text_before, appended))
 
+        # Open WebUI appends its memory to what the last copy of the filter returned, as copies run inlet in turn.
+        inlet_texts = getattr(getattr(__request__, "state", None), "graphiti_inlet_user_text", {})
+        own_key = ((__metadata__ or {}).get("message_id"), __id__)
+        inlet_user_text = (
+            [text for key, text in inlet_texts.items() if key[0] == own_key[0]][-1] if own_key in inlet_texts else None
+        )
+
         self._launch_background_task(
             self._save_memory_background(
                 body=body_snapshot,
@@ -4655,6 +4690,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 filter_id_for_prefix=filter_id_for_prefix,
                 reference_time=reference_time,
                 appended_memory=tuple(appended_memory),
+                inlet_user_text=inlet_user_text,
             )
         )
         return body
@@ -4669,6 +4705,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         filter_id_for_prefix: str,
         reference_time: datetime,
         appended_memory: tuple[tuple[str, str], ...] = (),
+        inlet_user_text: Optional[str] = None,
     ) -> None:
         try:
             await self._save_memory_background_inner(
@@ -4680,6 +4717,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
                 filter_id_for_prefix=filter_id_for_prefix,
                 reference_time=reference_time,
                 appended_memory=appended_memory,
+                inlet_user_text=inlet_user_text,
             )
         except Exception:
             traceback.print_exc()
@@ -4706,6 +4744,7 @@ window.addEventListener('resize', renderGraph, { passive: true });
         filter_id_for_prefix: str,
         reference_time: datetime,
         appended_memory: tuple[tuple[str, str], ...] = (),
+        inlet_user_text: Optional[str] = None,
     ) -> None:
         # Initialize graphiti in background to avoid blocking outlet()
         if not await self._ensure_graphiti_initialized() or self.graphiti is None:
@@ -4766,6 +4805,10 @@ window.addEventListener('resize', renderGraph, { passive: true });
         # This ensures that both the user's command and the assistant's response are not saved
         # (e.g., deletion requests and their confirmations)
         latest_user_content = self._get_content_from_message(last_user_message) if last_user_message else None
+        if latest_user_content and inlet_user_text is not None:
+            latest_user_content = without_core_memory_context(
+                latest_user_content, inlet_user_text, (__metadata__ or {}).get("base_user_prompt")
+            )
         for text_before, appended in appended_memory:
             # Open WebUI rewrites skill mentions inside the appended memory too; it then reads as the user's own text
             if appended not in (latest_user_content or ""):
